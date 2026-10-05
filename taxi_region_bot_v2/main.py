@@ -1,6 +1,7 @@
 import asyncio
 import os
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
@@ -15,38 +16,97 @@ from app.handlers.messages import router as messages_router
 
 # ============================================================
 # ЗАГРУЗКА .ENV
+#
+# Локально .env находится в корне проекта:
+# G:/taxi_region_bot_v2/.env
+#
+# На Render переменные будут передаваться через Environment
+# Variables, поэтому load_dotenv() просто ничего не изменит.
 # ============================================================
 
-load_dotenv(
-    "G:/taxi_region_bot_v2/.env"
-)
+load_dotenv()
 
 
 # ============================================================
-# MAIN
+# HTTP-СЕРВЕР ДЛЯ RENDER
 # ============================================================
 
-async def main():
+async def health(request):
+    return web.Response(
+        text="Taxi bot is running"
+    )
 
-    token = os.getenv("BOT_TOKEN")
+
+async def start_web_server():
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        health
+    )
+
+    app.router.add_get(
+        "/health",
+        health
+    )
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000"
+        )
+    )
+
+    runner = web.AppRunner(app)
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port
+    )
+
+    await site.start()
+
+    print(
+        f"HTTP-сервер запущен на порту {port}"
+    )
+
+    return runner
+
+
+# ============================================================
+# TELEGRAM BOT
+# ============================================================
+
+async def start_bot():
+
+    token = os.getenv(
+        "BOT_TOKEN"
+    )
 
     if not token:
         raise RuntimeError(
-            "Не найден BOT_TOKEN в .env"
+            "Не найден BOT_TOKEN"
         )
 
-    admin_id = os.getenv("ADMIN_ID")
+    admin_id = os.getenv(
+        "ADMIN_ID"
+    )
 
     if not admin_id:
         raise RuntimeError(
-            "Не найден ADMIN_ID в .env"
+            "Не найден ADMIN_ID"
         )
 
-    drivers_chat_id = os.getenv("DRIVERS_CHAT_ID")
+    drivers_chat_id = os.getenv(
+        "DRIVERS_CHAT_ID"
+    )
 
     if not drivers_chat_id:
         raise RuntimeError(
-            "Не найден DRIVERS_CHAT_ID в .env"
+            "Не найден DRIVERS_CHAT_ID"
         )
 
     print(
@@ -82,7 +142,6 @@ async def main():
     # ========================================================
     # ROUTERS
     #
-    # ВАЖНО:
     # test_order подключаем ДО messages,
     # потому что messages обрабатывает обычный текст.
     # ========================================================
@@ -123,9 +182,40 @@ async def main():
         "Порядок routers: start -> admin -> drivers -> test_order -> messages"
     )
 
-    await dp.start_polling(
-        bot
-    )
+    try:
+
+        await dp.start_polling(
+            bot
+        )
+
+    finally:
+
+        await bot.session.close()
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    # ========================================================
+    # СНАЧАЛА HTTP-СЕРВЕР
+    # ========================================================
+
+    web_runner = await start_web_server()
+
+    try:
+
+        # ====================================================
+        # TELEGRAM POLLING
+        # ====================================================
+
+        await start_bot()
+
+    finally:
+
+        await web_runner.cleanup()
 
 
 # ============================================================
@@ -134,4 +224,6 @@ async def main():
 
 if __name__ == "__main__":
 
-    asyncio.run(main())
+    asyncio.run(
+        main()
+    )
