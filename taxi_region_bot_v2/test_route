@@ -1,0 +1,27 @@
+import asyncio
+
+from app.services.route_service import get_route_distance
+
+
+async def main():
+
+    print("Проверяем маршрут...")
+
+    distance = await get_route_distance(
+        "Пенза, Россия",
+        "Воробьевка, Пензенская область, Россия"
+    )
+
+    if distance is None:
+
+        print("❌ Маршрут не найден.")
+
+    else:
+
+        print(
+            f"✅ Расстояние: {distance} км"
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
