@@ -1,14 +1,8 @@
+
 import re
 
 
-# ============================================================
-# НАСЕЛЁННЫЕ ПУНКТЫ
-# ============================================================
-
 PLACES = {
-
-    # Пензенская область
-
     "пенза": "Пенза",
     "пензы": "Пенза",
     "пензу": "Пенза",
@@ -43,8 +37,6 @@ PLACES = {
     "никольска": "Никольск",
     "никольску": "Никольск",
 
-    # Саратовская область
-
     "саратов": "Саратов",
     "саратова": "Саратов",
     "саратову": "Саратов",
@@ -58,8 +50,6 @@ PLACES = {
 
     "вольск": "Вольск",
     "вольска": "Вольск",
-
-    # Мордовия
 
     "саранск": "Саранск",
     "саранска": "Саранск",
@@ -75,17 +65,88 @@ PLACES = {
 }
 
 
-# ============================================================
-# ПОИСК НАСЕЛЁННЫХ ПУНКТОВ
-# ============================================================
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+
+    text = str(text)
+
+    text = text.replace("\u00a0", " ")
+    text = text.replace("–", "—")
+    text = text.replace("−", "—")
+
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+def get_house_pattern():
+    return (
+        r"\d+"
+        r"(?:"
+        r"\s*/\s*\d+"
+        r"|"
+        r"\s*-\s*\d+"
+        r"|"
+        r"\s*[кК]\s*\d+"
+        r"|"
+        r"\s*стр\.?\s*\d+"
+        r"|"
+        r"[А-Яа-яЁёA-Za-z]"
+        r")?"
+    )
+
+
+def extract_house_number(text: str):
+    if not text:
+        return None
+
+    text = normalize_text(text)
+
+    pattern = get_house_pattern()
+
+    matches = list(
+        re.finditer(
+            rf"(?<!\w)({pattern})(?!\w)",
+            text
+        )
+    )
+
+    for match in matches:
+        value = match.group(1).strip()
+
+        after = text[match.end():]
+
+        # Не принимаем число перед "человек", "пассажиров" и т. п.
+        if re.match(
+            r"\s*(?:человек|человека|чел\.?|"
+            r"пассажир|пассажира|пассажиров)\b",
+            after,
+            re.IGNORECASE
+        ):
+            continue
+
+        return value
+
+    return None
+
+
+def normalize_house_number(house_number):
+    if not house_number:
+        return None
+
+    value = str(house_number)
+
+    value = value.replace(" ", "")
+    value = value.replace("К", "к")
+    value = value.replace("стр.", "стр")
+    value = value.replace("Стр.", "стр")
+
+    return value
+
 
 def find_places(text):
-    """
-    Ищет населённые пункты в тексте
-    и возвращает уникальные места
-    в порядке появления.
-    """
-
+    text = normalize_text(text)
     text_lower = text.lower()
 
     matches = []
@@ -97,7 +158,6 @@ def find_places(text):
     )
 
     for alias in aliases:
-
         pattern = (
             r"(?<![а-яё])"
             + re.escape(alias)
@@ -108,41 +168,33 @@ def find_places(text):
             pattern,
             text_lower
         ):
-
             matches.append(
                 (
                     match.start(),
                     match.end(),
-                    PLACES[alias]
+                    PLACES[alias],
+                    alias
                 )
             )
 
     matches.sort(
-        key=lambda item: item[0]
+        key=lambda item: (
+            item[0],
+            -(item[1] - item[0])
+        )
     )
 
     result = []
 
-    for start, end, place in matches:
-
+    for start, end, place, alias in matches:
         if place not in result:
             result.append(place)
 
     return result
 
 
-# ============================================================
-# ПОИСК ВСЕХ НАСЕЛЁННЫХ ПУНКТОВ
-# ============================================================
-
-def find_places_all(text):
-    """
-    Ищет все населённые пункты
-    в порядке появления.
-
-    Повторы сохраняются.
-    """
-
+def find_place_positions(text):
+    text = normalize_text(text)
     text_lower = text.lower()
 
     matches = []
@@ -154,7 +206,6 @@ def find_places_all(text):
     )
 
     for alias in aliases:
-
         pattern = (
             r"(?<![а-яё])"
             + re.escape(alias)
@@ -165,532 +216,600 @@ def find_places_all(text):
             pattern,
             text_lower
         ):
-
             matches.append(
-                (
-                    match.start(),
-                    match.end(),
-                    PLACES[alias]
-                )
+                {
+                    "start": match.start(),
+                    "end": match.end(),
+                    "place": PLACES[alias],
+                    "alias": alias,
+                }
             )
 
     matches.sort(
-        key=lambda item: item[0]
+        key=lambda item: (
+            item["start"],
+            -(item["end"] - item["start"])
+        )
     )
 
     result = []
+    occupied_until = -1
 
-    occupied_ranges = []
-
-    for start, end, place in matches:
-
-        overlap = False
-
-        for old_start, old_end in occupied_ranges:
-
-            if (
-                start < old_end
-                and end > old_start
-            ):
-                overlap = True
-                break
-
-        if overlap:
+    for item in matches:
+        if item["start"] < occupied_until:
             continue
 
-        result.append(place)
-
-        occupied_ranges.append(
-            (start, end)
-        )
+        result.append(item)
+        occupied_until = item["end"]
 
     return result
 
 
-# ============================================================
-# ПОСТРОЕНИЕ ШАБЛОНА НАСЕЛЁННЫХ ПУНКТОВ
-# ============================================================
+def remove_passenger_phrase(text: str) -> str:
+    if not text:
+        return ""
 
-def get_place_pattern():
+    result = normalize_text(text)
+
+    patterns = [
+        r"\b\d+\s*(?:человек|человека|чел\.?)\b",
+        r"\b\d+\s*(?:пассажир|пассажира|пассажиров)\b",
+        r"\bнас\s+\d+\b",
+        r"\bнас\s+(?:двое|трое|четверо|пятеро|шестеро)\b",
+        (
+            r"\b(?:один|одна|двое|две|трое|три|четверо|"
+            r"четыре|пятеро|пять|шестеро|шесть)"
+            r"\s*(?:человек|человека|чел\.?|"
+            r"пассажир|пассажира|пассажиров)\b"
+        ),
+    ]
+
+    for pattern in patterns:
+        result = re.sub(
+            pattern,
+            "",
+            result,
+            flags=re.IGNORECASE
+        )
+
+    result = re.sub(
+        r",\s*,+",
+        ",",
+        result
+    )
+
+    result = re.sub(
+        r"\s*,\s*$",
+        "",
+        result
+    )
+
+    result = re.sub(
+        r"^\s*,\s*",
+        "",
+        result
+    )
+
+    return normalize_text(result)
+
+
+def remove_date_time_phrases(text: str) -> str:
+    """
+    Удаляет дату и время из адресной части.
+
+    Важно:
+    конструкции вида:
+        завтра в 9:00
+        сегодня в 18:30
+        послезавтра в 08:15
+        в 10:00
+
+    удаляются целиком вместе с предлогом "в",
+    чтобы "в" не оставалась в адресе.
+    """
+
+    if not text:
+        return ""
+
+    result = normalize_text(text)
+
+    # Сначала удаляем конструкции с точным временем.
+    # Важно удалить вместе с "в":
+    #
+    # "завтра в 9:00"
+    # "сегодня в 18:30"
+    # "в 10:00"
+    #
+    # Также допускается "завтра, в 9:00".
+    exact_time_patterns = [
+        r"\b(?:сегодня|завтра|послезавтра)\s*,?\s+в\s+\d{1,2}[:.]\d{2}\b",
+        r"\bв\s+\d{1,2}[:.]\d{2}\b",
+        r"\b(?:сегодня|завтра|послезавтра)\s+\d{1,2}[:.]\d{2}\b",
+    ]
+
+    for pattern in exact_time_patterns:
+        result = re.sub(
+            pattern,
+            "",
+            result,
+            flags=re.IGNORECASE
+        )
+
+    # Затем удаляем оставшиеся слова даты.
+    date_patterns = [
+        r"\bпослезавтра\b",
+        r"\bзавтра\b",
+        r"\bсегодня\b",
+    ]
+
+    for pattern in date_patterns:
+        result = re.sub(
+            pattern,
+            "",
+            result,
+            flags=re.IGNORECASE
+        )
+
+    # Удаляем словесное время.
+    time_patterns = [
+        r"\bутром\b",
+        r"\bутро\b",
+        r"\bднём\b",
+        r"\bднем\b",
+        r"\bдень\b",
+        r"\bвечером\b",
+        r"\bвечер\b",
+        r"\bночью\b",
+        r"\bночь\b",
+    ]
+
+    for pattern in time_patterns:
+        result = re.sub(
+            pattern,
+            "",
+            result,
+            flags=re.IGNORECASE
+        )
+
+    # Если где-то осталось отдельное "в" после удаления времени,
+    # удаляем его только в конце адресной части.
+    result = re.sub(
+        r",\s*в\s*$",
+        "",
+        result,
+        flags=re.IGNORECASE
+    )
+
+    result = re.sub(
+        r"\s+в\s*$",
+        "",
+        result,
+        flags=re.IGNORECASE
+    )
+
+    # Убираем лишние запятые и пробелы.
+    result = re.sub(
+        r",\s*,+",
+        ",",
+        result
+    )
+
+    result = re.sub(
+        r"\s*,\s*$",
+        "",
+        result
+    )
+
+    result = re.sub(
+        r"^\s*,\s*",
+        "",
+        result
+    )
+
+    result = re.sub(
+        r"\s+",
+        " ",
+        result
+    )
+
+    return normalize_text(result)
+
+
+def clean_address_part(text: str) -> str:
+    if not text:
+        return ""
+
+    result = normalize_text(text)
+
+    result = remove_passenger_phrase(result)
+    result = remove_date_time_phrases(result)
+
+    result = result.strip(" ,;.")
+
+    result = re.sub(
+        r"\s*,\s*",
+        ", ",
+        result
+    )
+
+    result = re.sub(
+        r"\s+",
+        " ",
+        result
+    )
+
+    return result.strip()
+
+
+def extract_address_from_segment(
+    segment: str,
+    place: str
+):
+    if not segment:
+        return None
+
+    segment = clean_address_part(segment)
+
+    if not segment:
+        return None
+
+    place = place or ""
 
     aliases = sorted(
-        PLACES.keys(),
+        [
+            alias
+            for alias, canonical in PLACES.items()
+            if canonical == place
+        ],
         key=len,
         reverse=True
     )
 
-    return "|".join(
-        re.escape(alias)
-        for alias in aliases
-    )
-
-
-# ============================================================
-# ОПРЕДЕЛЕНИЕ НАПРАВЛЕНИЯ
-# ============================================================
-
-def find_direction(text):
-    """
-    Определяет откуда и куда едет пассажир.
-
-    Поддерживает:
-
-    Из Заречного в Пензу
-    Из Пензы в Воробьевку
-    Пенза в Заречный
-    Пенза -> Воробьевка
-    Пенза → Воробьевка
-    Пенза - Воробьевка
-    Пенза — Воробьевка
-    Пенза Воробьевка
-    Пенза Пенза
-    """
-
-    text_lower = text.lower()
-
-    place_pattern = get_place_pattern()
-
-    # --------------------------------------------------------
-    # "из Заречного в Пензу"
-    # --------------------------------------------------------
-
-    pattern = (
-        r"(?:из|с)\s+("
-        + place_pattern
-        + r")\s+"
-        r"(?:в|до|на)\s+("
-        + place_pattern
-        + r")"
-    )
-
-    match = re.search(
-        pattern,
-        text_lower
-    )
-
-    if match:
-
-        from_place = PLACES.get(
-            match.group(1)
-        )
-
-        to_place = PLACES.get(
-            match.group(2)
-        )
-
-        if from_place and to_place:
-
-            return (
-                from_place,
-                to_place
-            )
-
-    # --------------------------------------------------------
-    # "Пенза в Заречный"
-    # --------------------------------------------------------
-
-    pattern = (
-        r"\b("
-        + place_pattern
-        + r")\s+"
-        r"(?:в|до|на)\s+("
-        + place_pattern
-        + r")\b"
-    )
-
-    match = re.search(
-        pattern,
-        text_lower
-    )
-
-    if match:
-
-        from_place = PLACES.get(
-            match.group(1)
-        )
-
-        to_place = PLACES.get(
-            match.group(2)
-        )
-
-        if from_place and to_place:
-
-            return (
-                from_place,
-                to_place
-            )
-
-    # --------------------------------------------------------
-    # "Пенза -> Воробьевка"
-    # "Пенза → Воробьевка"
-    # "Пенза - Воробьевка"
-    # --------------------------------------------------------
-
-    pattern = (
-        r"\b("
-        + place_pattern
-        + r")"
-        r"\s*(?:->|→|—|–|-)\s*"
-        r"("
-        + place_pattern
-        + r")\b"
-    )
-
-    match = re.search(
-        pattern,
-        text_lower
-    )
-
-    if match:
-
-        from_place = PLACES.get(
-            match.group(1)
-        )
-
-        to_place = PLACES.get(
-            match.group(2)
-        )
-
-        if from_place and to_place:
-
-            return (
-                from_place,
-                to_place
-            )
-
-    # --------------------------------------------------------
-    # "Пенза Воробьевка"
-    # --------------------------------------------------------
-
-    pattern = (
-        r"\b("
-        + place_pattern
-        + r")\s+("
-        + place_pattern
-        + r")\b"
-    )
-
-    match = re.search(
-        pattern,
-        text_lower
-    )
-
-    if match:
-
-        from_place = PLACES.get(
-            match.group(1)
-        )
-
-        to_place = PLACES.get(
-            match.group(2)
-        )
-
-        if from_place and to_place:
-
-            return (
-                from_place,
-                to_place
-            )
-
-    return None, None
-
-
-# ============================================================
-# ПРОВЕРКА: ЯВЛЯЕТСЯ ЛИ ФРАГМЕНТ НАСЕЛЁННЫМ ПУНКТОМ
-# ============================================================
-
-def contains_place_name(text):
-    """
-    Проверяет, содержит ли текст название
-    населённого пункта.
-
-    Используется при разборе адресов.
-
-    Например:
-
-    "Воробьевка 2"
-
-    не должно считаться улицей в адресе Пензы,
-    потому что Воробьевка — отдельный населённый пункт.
-    """
-
-    text_lower = text.lower().strip()
-
-    aliases = sorted(
-        PLACES.keys(),
-        key=len,
-        reverse=True
-    )
+    cleaned = segment
 
     for alias in aliases:
-
         pattern = (
             r"(?<![а-яё])"
             + re.escape(alias)
             + r"(?![а-яё])"
         )
 
-        if re.search(
+        match = re.search(
             pattern,
-            text_lower
-        ):
-            return True
+            cleaned.lower()
+        )
 
-    return False
+        if match:
+            before = cleaned[:match.start()]
+            after = cleaned[match.end():]
 
+            cleaned = before + " " + after
+            break
 
-# ============================================================
-# ПОИСК АДРЕСОВ
-# ============================================================
+    cleaned = cleaned.strip(" ,;.-")
 
-def clean_address(address):
-    """
-    Очищает адрес от лишних пробелов и знаков.
-    """
+    if not cleaned:
+        return place
 
-    address = address.strip()
+    cleaned = re.sub(
+        r"\s*,\s*",
+        ", ",
+        cleaned
+    )
 
-    address = re.sub(
+    cleaned = re.sub(
         r"\s+",
         " ",
-        address
+        cleaned
+    ).strip()
+
+    if cleaned.lower().startswith(
+        place.lower()
+    ):
+        return cleaned
+
+    return f"{place}, {cleaned}"
+
+
+def find_direction(text):
+    text = normalize_text(text)
+    text_lower = text.lower()
+
+    aliases = sorted(
+        PLACES.keys(),
+        key=len,
+        reverse=True
     )
 
-    address = re.sub(
-        r"^[,\-—–:]+",
-        "",
-        address
+    place_pattern = "|".join(
+        re.escape(alias)
+        for alias in aliases
     )
 
-    address = re.sub(
-        r"[,\-—–:]+$",
-        "",
-        address
-    )
-
-    return address.strip()
-
-
-def find_address_parts(text):
-    """
-    Ищет конструкции:
-
-    Пенза, улица Ленина, 25
-    Пенза ул. Ленина 25
-    Пенза, Ленина, 25
-    Воробьевка, Советская, 10
-
-    ВАЖНО:
-
-    "Пенза Воробьевка 2 человека"
-
-    НЕ считается адресом.
-
-    В этом случае:
-
-    Пенза -> населённый пункт
-    Воробьевка -> населённый пункт
-    2 -> пассажиры
-    """
-
-    text_clean = re.sub(
-        r"\s+",
-        " ",
-        text.strip()
-    )
-
-    place_pattern = get_place_pattern()
-
-    # --------------------------------------------------------
-    # Ищем адрес с номером дома.
-    #
-    # Разрешены:
-    #
-    # Пенза Ленина 25
-    # Пенза, Ленина, 25
-    # Пенза улица Ленина 25
-    # Пенза ул. Ленина 25
-    # --------------------------------------------------------
-
-    address_pattern = (
-        r"("
+    # Например:
+    # из Пензы в Саратов
+    # из Пензы до Саратова
+    pattern = (
+        r"(?:из|с)\s+("
+        + place_pattern
+        + r")\s+(?:в|до|на)\s+("
         + place_pattern
         + r")"
-        r"(?:\s*,?\s*)"
-        r"(?:улица|ул\.?|проспект|пр-т|переулок|пер\.?|"
-        r"шоссе|площадь|пл\.?|бульвар|бул\.?|"
-        r"набережная|наб\.?|проезд|пр-д)?"
-        r"\s*"
-        r"([А-Яа-яЁёA-Za-z0-9.\- ]+?)"
-        r"\s*,?\s*"
-        r"(\d+[А-Яа-яA-Za-z]?)"
     )
 
-    matches = list(
-        re.finditer(
-            address_pattern,
-            text_clean,
-            flags=re.IGNORECASE
-        )
+    match = re.search(
+        pattern,
+        text_lower
     )
 
-    addresses = []
-
-    for match in matches:
-
-        place_alias = match.group(1).lower()
-
-        place = PLACES.get(
-            place_alias
+    if match:
+        from_place = PLACES.get(
+            match.group(1)
+        )
+        to_place = PLACES.get(
+            match.group(2)
         )
 
-        street = match.group(2).strip()
+        if from_place and to_place:
+            return from_place, to_place
 
-        house = match.group(3).strip()
+    # Например:
+    # Пенза в Саратов
+    pattern = (
+        r"\b("
+        + place_pattern
+        + r")\s+"
+        r"(?:в|до|на)\s+("
+        + place_pattern
+        + r")\b"
+    )
 
-        if not place:
-            continue
+    match = re.search(
+        pattern,
+        text_lower
+    )
 
-        # ----------------------------------------------------
-        # КРИТИЧЕСКАЯ ПРОВЕРКА
-        #
-        # Если предполагаемая улица сама является
-        # населённым пунктом, это НЕ адрес.
-        #
-        # Например:
-        #
-        # Пенза Воробьевка 2
-        #
-        # Старый код:
-        # Пенза, Воробьевка, 2
-        #
-        # Новый код:
-        # это НЕ адрес.
-        # ----------------------------------------------------
-
-        if contains_place_name(street):
-            continue
-
-        # ----------------------------------------------------
-        # Убираем лишние слова в конце названия улицы
-        # ----------------------------------------------------
-
-        street = re.sub(
-            r"\s+[,]+$",
-            "",
-            street
-        ).strip()
-
-        if not street:
-            continue
-
-        address = (
-            f"{place}, "
-            f"{street}, "
-            f"{house}"
+    if match:
+        from_place = PLACES.get(
+            match.group(1)
+        )
+        to_place = PLACES.get(
+            match.group(2)
         )
 
-        addresses.append(
-            (
-                match.start(),
-                match.end(),
-                address
+        if from_place and to_place:
+            return from_place, to_place
+
+    # Например:
+    # Пенза — Саратов
+    # Пенза -> Саратов
+    pattern = (
+        r"\b("
+        + place_pattern
+        + r")"
+        r"\s*(?:->|→|—|-)\s*"
+        r"("
+        + place_pattern
+        + r")\b"
+    )
+
+    match = re.search(
+        pattern,
+        text_lower
+    )
+
+    if match:
+        from_place = PLACES.get(
+            match.group(1)
+        )
+        to_place = PLACES.get(
+            match.group(2)
+        )
+
+        if from_place and to_place:
+            return from_place, to_place
+
+    return None, None
+
+
+def split_route_by_dash(text: str):
+    if not text:
+        return None, None
+
+    text = normalize_text(text)
+
+    for separator in (
+        "—",
+        "–",
+        "→",
+        "->"
+    ):
+        if separator in text:
+            parts = text.split(
+                separator,
+                1
             )
-        )
 
-    # --------------------------------------------------------
-    # Убираем пересечения
-    # --------------------------------------------------------
+            if len(parts) == 2:
+                left = parts[0].strip()
+                right = parts[1].strip()
 
-    result = []
+                if left and right:
+                    return left, right
 
-    occupied_ranges = []
-
-    for start, end, address in addresses:
-
-        overlap = False
-
-        for old_start, old_end in occupied_ranges:
-
-            if (
-                start < old_end
-                and end > old_start
-            ):
-                overlap = True
-                break
-
-        if overlap:
-            continue
-
-        result.append(
-            (
-                start,
-                end,
-                clean_address(address)
-            )
-        )
-
-        occupied_ranges.append(
-            (start, end)
-        )
-
-    result.sort(
-        key=lambda item: item[0]
+    match = re.search(
+        r"\s+-\s+",
+        text
     )
 
-    if len(result) >= 2:
+    if match:
+        left = text[:match.start()].strip()
+        right = text[match.end():].strip()
 
-        return {
-            "from_address": result[0][2],
-            "to_address": result[1][2]
-        }
+        if left and right:
+            return left, right
 
-    if len(result) == 1:
+    return None, None
 
-        return {
-            "from_address": result[0][2],
-            "to_address": None
-        }
+
+def parse_dash_route(text: str):
+    left, right = split_route_by_dash(text)
+
+    if not left or not right:
+        return None
+
+    left_places = find_places(left)
+    right_places = find_places(right)
+
+    if not left_places or not right_places:
+        return None
+
+    from_place = left_places[0]
+    to_place = right_places[0]
+
+    from_address = extract_address_from_segment(
+        left,
+        from_place
+    )
+
+    to_address = extract_address_from_segment(
+        right,
+        to_place
+    )
 
     return {
-        "from_address": None,
-        "to_address": None
+        "from_place": from_place,
+        "to_place": to_place,
+        "from_address": from_address,
+        "to_address": to_address,
     }
 
 
-# ============================================================
-# ОПРЕДЕЛЕНИЕ КОЛИЧЕСТВА ПАССАЖИРОВ
-# ============================================================
+def parse_route_by_places(text: str):
+    positions = find_place_positions(text)
 
-def find_passengers(text):
-    """
-    Определяет количество пассажиров.
+    if len(positions) < 2:
+        return None
 
-    Понимает:
+    first = positions[0]
+    second = positions[1]
 
-    1 человек
-    2 человека
-    3 человека
-    4 пассажира
-    5 пассажиров
-    2 пассажира
-    3 чел
-    3 чел.
-    нас 3
-    нас трое
-    """
+    from_place = first["place"]
+    to_place = second["place"]
 
-    text_lower = text.lower().strip()
+    first_segment = text[
+        :second["start"]
+    ].strip()
+
+    second_segment = text[
+        second["start"]:
+    ].strip()
+
+    from_address = extract_address_from_segment(
+        first_segment,
+        from_place
+    )
+
+    to_address = extract_address_from_segment(
+        second_segment,
+        to_place
+    )
+
+    return {
+        "from_place": from_place,
+        "to_place": to_place,
+        "from_address": from_address,
+        "to_address": to_address,
+    }
+
+
+def parse_direction_route(text: str):
+    text_normalized = normalize_text(text)
+    text_lower = text_normalized.lower()
+
+    aliases = sorted(
+        PLACES.keys(),
+        key=len,
+        reverse=True
+    )
+
+    place_pattern = "|".join(
+        re.escape(alias)
+        for alias in aliases
+    )
+
+    pattern = (
+        r"(?:из|с)\s+("
+        + place_pattern
+        + r")"
+        r"(.*?)"
+        r"\s+(?:в|до|на)\s+("
+        + place_pattern
+        + r")"
+        r"(.*)"
+    )
 
     match = re.search(
-        r"\b(\d+)\s*"
-        r"(?:человек|человека|чел\.?|"
+        pattern,
+        text_lower,
+        flags=re.IGNORECASE
+    )
+
+    if not match:
+        return None
+
+    from_alias = match.group(1)
+    middle = match.group(2)
+    to_alias = match.group(3)
+    tail = match.group(4)
+
+    from_place = PLACES.get(
+        from_alias
+    )
+
+    to_place = PLACES.get(
+        to_alias
+    )
+
+    if not from_place or not to_place:
+        return None
+
+    from_segment = (
+        from_place
+        + " "
+        + middle
+    )
+
+    to_segment = (
+        to_place
+        + " "
+        + tail
+    )
+
+    return {
+        "from_place": from_place,
+        "to_place": to_place,
+        "from_address": extract_address_from_segment(
+            from_segment,
+            from_place
+        ),
+        "to_address": extract_address_from_segment(
+            to_segment,
+            to_place
+        ),
+    }
+
+
+def find_passengers(text):
+    text_lower = normalize_text(text).lower()
+
+    match = re.search(
+        r"\b(\d+)\s*(?:человек|человека|чел\.?|"
         r"пассажир|пассажира|пассажиров)\b",
         text_lower
     )
 
     if match:
-
         return match.group(1)
 
     match = re.search(
@@ -699,104 +818,48 @@ def find_passengers(text):
     )
 
     if match:
-
         return match.group(1)
 
     words = {
-
         "один": "1",
         "одна": "1",
-
         "двое": "2",
         "две": "2",
-
         "трое": "3",
         "три": "3",
-
         "четверо": "4",
         "четыре": "4",
-
         "пятеро": "5",
         "пять": "5",
-
         "шестеро": "6",
         "шесть": "6",
     }
 
     for word, number in words.items():
-
         pattern = (
             r"\b"
             + re.escape(word)
             + r"\b"
         )
 
-        if re.search(
+        if not re.search(
             pattern,
             text_lower
         ):
+            continue
 
-            if (
-                "человек" in text_lower
-                or "пассажир" in text_lower
-                or "нас " in text_lower
-            ):
-
-                return number
+        if (
+            "человек" in text_lower
+            or "пассажир" in text_lower
+            or "нас " in text_lower
+        ):
+            return number
 
     return "не указано"
 
 
-# ============================================================
-# ОПРЕДЕЛЕНИЕ ВРЕМЕНИ
-# ============================================================
-
 def find_time(text):
-    """
-    Определяет время поездки.
-
-    утром -> утро
-    днем -> день
-    днём -> день
-    вечером -> вечер
-    ночью -> ночь
-
-    Также понимает:
-
-    8:30
-    18:45
-    """
-
-    text_lower = text.lower()
-
-    if (
-        "утро" in text_lower
-        or "утром" in text_lower
-    ):
-
-        return "утро"
-
-    if (
-        "день" in text_lower
-        or "днем" in text_lower
-        or "днём" in text_lower
-    ):
-
-        return "день"
-
-    if (
-        "вечер" in text_lower
-        or "вечером" in text_lower
-    ):
-
-        return "вечер"
-
-    if (
-        "ночь" in text_lower
-        or "ночью" in text_lower
-    ):
-
-        return "ночь"
+    text_lower = normalize_text(text).lower()
 
     match = re.search(
         r"\b\d{1,2}[:.]\d{2}\b",
@@ -804,22 +867,38 @@ def find_time(text):
     )
 
     if match:
-
         return match.group(0)
+
+    if (
+        "утро" in text_lower
+        or "утром" in text_lower
+    ):
+        return "утро"
+
+    if (
+        "день" in text_lower
+        or "днем" in text_lower
+        or "днём" in text_lower
+    ):
+        return "день"
+
+    if (
+        "вечер" in text_lower
+        or "вечером" in text_lower
+    ):
+        return "вечер"
+
+    if (
+        "ночь" in text_lower
+        or "ночью" in text_lower
+    ):
+        return "ночь"
 
     return "не указано"
 
 
-# ============================================================
-# ОПРЕДЕЛЕНИЕ ДАТЫ
-# ============================================================
-
 def find_date(text):
-    """
-    Определяет относительную дату.
-    """
-
-    text_lower = text.lower()
+    text_lower = normalize_text(text).lower()
 
     if "послезавтра" in text_lower:
         return "послезавтра"
@@ -833,187 +912,172 @@ def find_date(text):
     return "не указана"
 
 
-# ============================================================
-# ОСНОВНОЙ ПАРСЕР
-# ============================================================
+def find_addresses(
+    text: str,
+    from_place: str | None,
+    to_place: str | None
+):
+    dash_result = parse_dash_route(text)
 
-async def parse_request(text: str):
+    if dash_result:
+        if (
+            not from_place
+            or dash_result["from_place"] == from_place
+        ) and (
+            not to_place
+            or dash_result["to_place"] == to_place
+        ):
+            return (
+                dash_result["from_address"],
+                dash_result["to_address"]
+            )
 
-    # --------------------------------------------------------
-    # Определяем направление
-    # --------------------------------------------------------
+    direction_result = parse_direction_route(text)
 
-    from_place, to_place = find_direction(
-        text
-    )
-
-    # --------------------------------------------------------
-    # Если направление не удалось определить
-    # специальной конструкцией,
-    # ищем все места в порядке появления.
-    # --------------------------------------------------------
-
-    if not from_place or not to_place:
-
-        places = find_places_all(
-            text
+    if direction_result:
+        return (
+            direction_result["from_address"],
+            direction_result["to_address"]
         )
 
-        if not from_place and len(places) >= 1:
-            from_place = places[0]
+    route_result = parse_route_by_places(text)
 
-        if not to_place and len(places) >= 2:
-            to_place = places[1]
+    if route_result:
+        return (
+            route_result["from_address"],
+            route_result["to_address"]
+        )
 
-    # --------------------------------------------------------
-    # Определяем адреса
-    # --------------------------------------------------------
+    if from_place:
+        address = extract_address_from_segment(
+            text,
+            from_place
+        )
 
-    addresses = find_address_parts(
-        text
-    )
+        return address, None
 
-    from_address = addresses.get(
-        "from_address"
-    )
+    return None, None
 
-    to_address = addresses.get(
-        "to_address"
-    )
 
-    # --------------------------------------------------------
-    # Если адреса найдены,
-    # используем их как точки маршрута.
-    # --------------------------------------------------------
+async def parse_request(text: str):
+    text = normalize_text(text)
 
-    route_from = (
-        from_address
-        or from_place
-        or "не определено"
-    )
+    if not text:
+        return {
+            "from_place": None,
+            "to_place": None,
+            "from_address": None,
+            "to_address": None,
+            "date": "не указана",
+            "time": "не указано",
+            "passengers": "не указано",
+        }
 
-    route_to = (
-        to_address
-        or to_place
-        or "не определено"
-    )
+    date = find_date(text)
+    time = find_time(text)
+    passengers = find_passengers(text)
 
-    # --------------------------------------------------------
-    # Остальные параметры
-    # --------------------------------------------------------
+    from_place, to_place = find_direction(text)
 
-    date = find_date(
-        text
-    )
+    dash_result = parse_dash_route(text)
 
-    time = find_time(
-        text
-    )
+    if dash_result:
+        from_place = dash_result["from_place"]
+        to_place = dash_result["to_place"]
 
-    passengers = find_passengers(
-        text
-    )
+        from_address = dash_result["from_address"]
+        to_address = dash_result["to_address"]
 
-    # --------------------------------------------------------
-    # Вывод в терминал
-    # --------------------------------------------------------
+    else:
+        direction_result = parse_direction_route(text)
 
-    print(
-        "----------------------------------------"
-    )
+        if direction_result:
+            from_place = direction_result["from_place"]
+            to_place = direction_result["to_place"]
 
-    print(
-        "ТЕКСТ КЛИЕНТА:"
-    )
+            from_address = direction_result["from_address"]
+            to_address = direction_result["to_address"]
 
+        else:
+            if not from_place or not to_place:
+                places = find_places(text)
+
+                if not from_place and len(places) >= 1:
+                    from_place = places[0]
+
+                if not to_place and len(places) >= 2:
+                    to_place = places[1]
+
+            from_address, to_address = find_addresses(
+                text,
+                from_place,
+                to_place
+            )
+
+    if from_place and not from_address:
+        from_address = from_place
+
+    if to_place and not to_address:
+        to_address = to_place
+
+    if from_address:
+        from_address = clean_address_part(
+            from_address
+        )
+
+    if to_address:
+        to_address = clean_address_part(
+            to_address
+        )
+
+    if from_place and not from_address:
+        from_address = from_place
+
+    if to_place and not to_address:
+        to_address = to_place
+
+    print("----------------------------------------")
+    print("ТЕКСТ КЛИЕНТА:")
     print(text)
-
     print()
-
     print(
         "ОТКУДА:",
         from_place or "не определено"
     )
-
     print(
         "КУДА:",
         to_place or "не определено"
     )
-
     print(
         "АДРЕС ОТКУДА:",
         from_address or "не указан"
     )
-
     print(
         "АДРЕС КУДА:",
         to_address or "не указан"
     )
-
-    print(
-        "МАРШРУТ ОТКУДА:",
-        route_from
-    )
-
-    print(
-        "МАРШРУТ КУДА:",
-        route_to
-    )
-
     print(
         "ДАТА:",
         date
     )
-
     print(
         "ВРЕМЯ:",
         time
     )
-
     print(
         "ПАССАЖИРОВ:",
         passengers
     )
-
-    print(
-        "----------------------------------------"
-    )
-
-    # --------------------------------------------------------
-    # Результат
-    # --------------------------------------------------------
+    print("----------------------------------------")
 
     return {
-
-        "from": route_from,
-
-        "to": route_to,
-
-        "from_place": (
-            from_place
-            or "не определено"
-        ),
-
-        "to_place": (
-            to_place
-            or "не определено"
-        ),
-
-        "from_address": (
-            from_address
-            or "не указан"
-        ),
-
-        "to_address": (
-            to_address
-            or "не указан"
-        ),
-
+        "from_place": from_place or "не определено",
+        "to_place": to_place or "не определено",
+        "from_address": from_address or "не указан",
+        "to_address": to_address or "не указан",
         "date": date,
-
         "time": time,
-
         "passengers": passengers,
-
         "status": "локальный анализ",
     }
+

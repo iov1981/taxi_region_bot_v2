@@ -1,3 +1,7 @@
+
+import html
+from html.parser import HTMLParser
+
 from aiogram import Router, F
 from aiogram.types import (
     Message,
@@ -25,6 +29,222 @@ from app.handlers.start import client_menu
 router = Router()
 
 print("messages.py загружен")
+
+
+# ============================================================
+# HTML-ПРОВЕРКА
+# ============================================================
+
+class TelegramHTMLValidator(HTMLParser):
+
+    ALLOWED_TAGS = {
+        "b",
+        "strong",
+        "i",
+        "em",
+        "u",
+        "ins",
+        "s",
+        "strike",
+        "del",
+        "code",
+        "pre",
+        "a",
+        "tg-spoiler",
+        "blockquote",
+    }
+
+    def __init__(self):
+        super().__init__(
+            convert_charrefs=False
+        )
+
+        self.errors = []
+        self.open_tags = []
+
+    def handle_starttag(self, tag, attrs):
+
+        tag = tag.lower()
+
+        if tag not in self.ALLOWED_TAGS:
+
+            self.errors.append(
+                f"Недопустимый HTML-тег: <{tag}>"
+            )
+
+            return
+
+        self.open_tags.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+
+        tag = tag.lower()
+
+        if tag not in self.ALLOWED_TAGS:
+
+            self.errors.append(
+                f"Недопустимый HTML-тег: <{tag}/>"
+            )
+
+    def handle_endtag(self, tag):
+
+        tag = tag.lower()
+
+        if tag not in self.ALLOWED_TAGS:
+
+            self.errors.append(
+                f"Недопустимый закрывающий тег: </{tag}>"
+            )
+
+            return
+
+        if not self.open_tags:
+
+            self.errors.append(
+                f"Лишний закрывающий тег: </{tag}>"
+            )
+
+            return
+
+        if self.open_tags[-1] != tag:
+
+            self.errors.append(
+                "Нарушена вложенность HTML: "
+                f"ожидался </{self.open_tags[-1]}>, "
+                f"получен </{tag}>"
+            )
+
+            return
+
+        self.open_tags.pop()
+
+    def handle_comment(self, data):
+
+        self.errors.append(
+            "HTML-комментарии запрещены."
+        )
+
+
+def validate_html(text: str) -> tuple[bool, list[str]]:
+
+    if not isinstance(text, str):
+
+        return False, [
+            "Текст сообщения не является строкой."
+        ]
+
+    parser = TelegramHTMLValidator()
+
+    try:
+
+        parser.feed(text)
+        parser.close()
+
+    except Exception as error:
+
+        parser.errors.append(
+            f"Ошибка HTML-парсера: {error}"
+        )
+
+    if parser.open_tags:
+
+        parser.errors.append(
+            "Не закрыты HTML-теги: "
+            + ", ".join(
+                f"<{tag}>"
+                for tag in parser.open_tags
+            )
+        )
+
+    return (
+        len(parser.errors) == 0,
+        parser.errors
+    )
+
+
+def escape_html(value) -> str:
+
+    if value is None:
+        return ""
+
+    return html.escape(
+        str(value),
+        quote=False
+    )
+
+
+async def send_html_message(
+        bot,
+        chat_id,
+        text,
+        **kwargs
+):
+
+    valid, errors = validate_html(text)
+
+    if valid:
+
+        return await bot.send_message(
+            chat_id,
+            text,
+            parse_mode="HTML",
+            **kwargs
+        )
+
+    print()
+    print("=" * 60)
+    print("❌ ОШИБКА HTML ПЕРЕД ОТПРАВКОЙ")
+    print("=" * 60)
+
+    for error in errors:
+
+        print(
+            "HTML:",
+            error
+        )
+
+    print()
+    print("ТЕКСТ С ОШИБКОЙ:")
+    print(text)
+    print("=" * 60)
+
+    safe_text = html.escape(
+        text,
+        quote=False
+    )
+
+    return await bot.send_message(
+        chat_id,
+        safe_text,
+        **kwargs
+    )
+
+
+# ============================================================
+# СЛУЖЕБНЫЕ СООБЩЕНИЯ
+# ============================================================
+
+def is_internal_message(text: str) -> bool:
+
+    if not text:
+        return False
+
+    text = text.strip()
+
+    internal_prefixes = (
+        "ГЕОКОДИРОВАНИЕ:",
+        "GEOAPIFY:",
+        "GEOAPIFY ПОИСК",
+        "ПОСТРОЕНИЕ МАРШРУТА",
+        "ROUTE SERVICE",
+    )
+
+    for prefix in internal_prefixes:
+
+        if text.startswith(prefix):
+            return True
+
+    return False
 
 
 # ============================================================
@@ -58,9 +278,11 @@ async def update_admin_order_card(
         admin_message_id = request["admin_message_id"]
 
         if not admin_message_id:
+
             print(
                 "⚠️ У заявки нет admin_message_id"
             )
+
             return
 
         from app.handlers.admin import order_keyboard
@@ -80,13 +302,37 @@ async def update_admin_order_card(
 
         updated_admin_text = (
             f"🚕 <b>НОВАЯ ЗАЯВКА №{request['id']}</b>\n\n"
-            f"👤 <b>Клиент:</b> {client_name}\n"
-            f"🆔 <b>ID:</b> {message.from_user.id}\n"
-            f"📞 <b>Телефон:</b> {phone}\n\n"
+            f"👤 <b>Клиент:</b> "
+            f"{escape_html(client_name)}\n"
+            f"🆔 <b>ID:</b> "
+            f"{escape_html(message.from_user.id)}\n"
+            f"📞 <b>Телефон:</b> "
+            f"{escape_html(phone)}\n\n"
             f"{request['ai_summary']}\n"
             f"📝 <b>Сообщение клиента:</b>\n"
-            f"{request['raw_text']}"
+            f"{escape_html(request['raw_text'])}"
         )
+
+        valid, errors = validate_html(
+            updated_admin_text
+        )
+
+        if not valid:
+
+            print()
+            print(
+                "❌ HTML карточки администратора "
+                "не прошёл проверку."
+            )
+
+            for error in errors:
+
+                print(
+                    "HTML:",
+                    error
+                )
+
+            return
 
         await message.bot.edit_message_text(
             chat_id=get_admin_id(),
@@ -100,10 +346,12 @@ async def update_admin_order_card(
         print(
             "✅ КАРТОЧКА АДМИНА ОБНОВЛЕНА ТЕЛЕФОНОМ"
         )
+
         print(
             "REQUEST ID:",
             request["id"]
         )
+
         print(
             "PHONE:",
             phone
@@ -115,6 +363,7 @@ async def update_admin_order_card(
         print(
             "❌ ОШИБКА ОБНОВЛЕНИЯ КАРТОЧКИ АДМИНА:"
         )
+
         print(
             type(error).__name__,
             repr(error)
@@ -136,8 +385,17 @@ async def process_phone(
     print("=" * 60)
     print("ПОЛУЧЕН ТЕЛЕФОН КЛИЕНТА")
     print("=" * 60)
-    print("USER ID:", message.from_user.id)
-    print("PHONE:", phone)
+
+    print(
+        "USER ID:",
+        message.from_user.id
+    )
+
+    print(
+        "PHONE:",
+        phone
+    )
+
     print("=" * 60)
 
     try:
@@ -164,24 +422,17 @@ async def process_phone(
             request_id
         )
 
-        # ----------------------------------------------------
-        # Обновляем карточку администратора
-        # ----------------------------------------------------
-
         await update_admin_order_card(
             message,
             request,
             phone
         )
 
-        # ----------------------------------------------------
-        # Ответ клиенту
-        # ----------------------------------------------------
-
-        await message.answer(
+        await send_html_message(
+            message.bot,
+            message.chat.id,
             "📞 <b>Телефон сохранён.</b>\n\n"
             "Администратор увидит его в заявке.",
-            parse_mode="HTML",
             reply_markup=client_menu()
         )
 
@@ -198,6 +449,7 @@ async def process_phone(
         print(
             "❌ ОШИБКА СОХРАНЕНИЯ ТЕЛЕФОНА:"
         )
+
         print(
             type(error).__name__,
             repr(error)
@@ -223,7 +475,7 @@ async def process_phone(
 async def handle_message(message: Message):
 
     # ========================================================
-    # ЕСЛИ КЛИЕНТ ОТПРАВИЛ TELEGRAM-КОНТАКТ
+    # TELEGRAM-КОНТАКТ
     # ========================================================
 
     if message.contact:
@@ -234,17 +486,23 @@ async def handle_message(message: Message):
         print("=" * 60)
         print("ПОЛУЧЕН КОНТАКТ КЛИЕНТА")
         print("=" * 60)
-        print("USER ID:", message.from_user.id)
+
+        print(
+            "USER ID:",
+            message.from_user.id
+        )
+
         print(
             "CONTACT USER ID:",
             message.contact.user_id
         )
-        print("PHONE:", phone)
-        print("=" * 60)
 
-        # ----------------------------------------------------
-        # Проверяем, что клиент отправил именно свой контакт
-        # ----------------------------------------------------
+        print(
+            "PHONE:",
+            phone
+        )
+
+        print("=" * 60)
 
         if (
             message.contact.user_id is not None
@@ -274,18 +532,69 @@ async def handle_message(message: Message):
     if not text:
         return
 
+    # ========================================================
+    # ЗАЩИТА ОТ СЛУЖЕБНЫХ СООБЩЕНИЙ
+    # ========================================================
+
+    if is_internal_message(text):
+
+        print()
+        print("=" * 60)
+        print("⚠️ СЛУЖЕБНОЕ СООБЩЕНИЕ")
+        print("=" * 60)
+
+        print(
+            "USER ID:",
+            message.from_user.id
+        )
+
+        print(
+            "TEXT:",
+            text
+        )
+
+        print(
+            "СООБЩЕНИЕ НЕ БУДЕТ "
+            "ОБРАБОТАНО КАК ЗАЯВКА."
+        )
+
+        print("=" * 60)
+
+        return
+
+    # ========================================================
+    # ЛОГИРОВАНИЕ
+    # ========================================================
+
     print()
     print("=" * 60)
     print("ПОЛУЧЕНО СООБЩЕНИЕ ОТ КЛИЕНТА")
     print("=" * 60)
-    print("USER ID:", message.from_user.id)
-    print("USERNAME:", message.from_user.username)
-    print("NAME:", message.from_user.first_name)
-    print("TEXT:", text)
+
+    print(
+        "USER ID:",
+        message.from_user.id
+    )
+
+    print(
+        "USERNAME:",
+        message.from_user.username
+    )
+
+    print(
+        "NAME:",
+        message.from_user.first_name
+    )
+
+    print(
+        "TEXT:",
+        text
+    )
+
     print("=" * 60)
 
     # ========================================================
-    # ПРОВЕРЯЕМ, НЕ ЯВЛЯЕТСЯ ЛИ ТЕКСТ НОМЕРОМ ТЕЛЕФОНА
+    # ПРОВЕРКА ТЕЛЕФОНА
     # ========================================================
 
     phone_text = (
@@ -295,8 +604,6 @@ async def handle_message(message: Message):
         .replace("(", "")
         .replace(")", "")
     )
-
-    # 89991234567 -> +79991234567
 
     if phone_text.startswith("8") and len(phone_text) == 11:
 
@@ -334,12 +641,13 @@ async def handle_message(message: Message):
             repr(error)
         )
 
-        await message.answer(
+        await send_html_message(
+            message.bot,
+            message.chat.id,
             "❌ <b>Не удалось разобрать заявку.</b>\n\n"
             "Пример:\n"
             "Пенза — Воробьевка, "
             "2 человека, завтра утром",
-            parse_mode="HTML",
             reply_markup=client_menu()
         )
 
@@ -381,19 +689,15 @@ async def handle_message(message: Message):
     )
 
     if not from_place:
-
         from_place = "не определено"
 
     if not to_place:
-
         to_place = "не определено"
 
     if not from_address:
-
         from_address = "не указан"
 
     if not to_address:
-
         to_address = "не указан"
 
     # ========================================================
@@ -411,7 +715,6 @@ async def handle_message(message: Message):
     )
 
     if from_place == to_place:
-
         city_trip = True
 
     trip_type = (
@@ -452,8 +755,17 @@ async def handle_message(message: Message):
         print("=" * 60)
         print("ПОСТРОЕНИЕ МАРШРУТА")
         print("=" * 60)
-        print("ОТКУДА:", route_from)
-        print("КУДА:", route_to)
+
+        print(
+            "ОТКУДА:",
+            route_from
+        )
+
+        print(
+            "КУДА:",
+            route_to
+        )
+
         print("=" * 60)
 
         try:
@@ -500,30 +812,35 @@ async def handle_message(message: Message):
     # ========================================================
 
     ai_summary = (
-        f"📍 <b>Откуда:</b> {from_place}\n"
-        f"🏁 <b>Куда:</b> {to_place}\n"
+        f"📍 <b>Откуда:</b> "
+        f"{escape_html(from_place)}\n"
+        f"🏁 <b>Куда:</b> "
+        f"{escape_html(to_place)}\n"
         f"{trip_type}\n"
-        f"📅 <b>Дата:</b> {date}\n"
-        f"🕐 <b>Время:</b> {time}\n"
-        f"👥 <b>Пассажиров:</b> {passengers}\n"
+        f"📅 <b>Дата:</b> "
+        f"{escape_html(date)}\n"
+        f"🕐 <b>Время:</b> "
+        f"{escape_html(time)}\n"
+        f"👥 <b>Пассажиров:</b> "
+        f"{escape_html(passengers)}\n"
     )
 
     if distance_km is not None:
 
         ai_summary += (
             f"📏 <b>Расстояние:</b> "
-            f"{distance_km} км\n"
+            f"{escape_html(distance_km)} км\n"
         )
 
     if price is not None:
 
         ai_summary += (
             f"💰 <b>Стоимость:</b> "
-            f"{format_price(price)}\n"
+            f"{escape_html(format_price(price))}\n"
         )
 
     # ========================================================
-    # СОЗДАЁМ ЗАКАЗ В БД
+    # СОЗДАНИЕ ЗАКАЗА
     # ========================================================
 
     try:
@@ -550,7 +867,9 @@ async def handle_message(message: Message):
             repr(error)
         )
 
-        await message.answer(
+        await send_html_message(
+            message.bot,
+            message.chat.id,
             "❌ Не удалось создать заявку.\n\n"
             "Попробуйте отправить её ещё раз.",
             reply_markup=client_menu()
@@ -561,7 +880,10 @@ async def handle_message(message: Message):
     print()
     print("=" * 60)
     print("ЗАЯВКА СОЗДАНА")
-    print("НОМЕР:", request_id)
+    print(
+        "НОМЕР:",
+        request_id
+    )
     print("=" * 60)
 
     # ========================================================
@@ -587,47 +909,49 @@ async def handle_message(message: Message):
 
     admin_text = (
         f"🚕 <b>НОВАЯ ЗАЯВКА №{request_id}</b>\n\n"
-        f"👤 <b>Клиент:</b> {client_name}\n"
-        f"🆔 <b>ID:</b> {message.from_user.id}\n"
+        f"👤 <b>Клиент:</b> "
+        f"{escape_html(client_name)}\n"
+        f"🆔 <b>ID:</b> "
+        f"{escape_html(message.from_user.id)}\n"
         f"📞 <b>Телефон:</b> не указан\n\n"
         f"{ai_summary}\n"
         f"📝 <b>Сообщение клиента:</b>\n"
-        f"{text}"
+        f"{escape_html(text)}"
     )
 
     print()
     print("=" * 60)
     print("ОТПРАВКА КАРТОЧКИ АДМИНУ")
     print("=" * 60)
+
     print(
         "ADMIN ID:",
         get_admin_id()
     )
+
     print(
         "REQUEST ID:",
         request_id
     )
+
     print(
         "КЛИЕНТ:",
         client_name
     )
+
     print("=" * 60)
 
     try:
 
-        admin_message = await message.bot.send_message(
+        admin_message = await send_html_message(
+            message.bot,
             get_admin_id(),
-            admin_text,
-            parse_mode="HTML"
+            admin_text
         )
 
         print(
             "✅ КАРТОЧКА АДМИНУ ОТПРАВЛЕНА"
         )
-
-        # ----------------------------------------------------
-        # Сохраняем ID сообщения администратора
-        # ----------------------------------------------------
 
         try:
 
@@ -643,13 +967,10 @@ async def handle_message(message: Message):
         except Exception as error:
 
             print(
-                "ОШИБКА СОХРАНЕНИЯ admin_message_id:",
+                "ОШИБКА СОХРАНЕНИЯ "
+                "admin_message_id:",
                 repr(error)
             )
-
-        # ----------------------------------------------------
-        # Добавляем существующие кнопки админа
-        # ----------------------------------------------------
 
         try:
 
@@ -674,7 +995,8 @@ async def handle_message(message: Message):
         except Exception as error:
 
             print(
-                "ОШИБКА ДОБАВЛЕНИЯ КНОПОК АДМИНУ:",
+                "ОШИБКА ДОБАВЛЕНИЯ "
+                "КНОПОК АДМИНУ:",
                 repr(error)
             )
 
@@ -682,7 +1004,8 @@ async def handle_message(message: Message):
 
         print()
         print(
-            "❌ ОШИБКА ОТПРАВКИ КАРТОЧКИ АДМИНУ"
+            "❌ ОШИБКА ОТПРАВКИ "
+            "КАРТОЧКИ АДМИНУ"
         )
 
         print(
@@ -696,55 +1019,64 @@ async def handle_message(message: Message):
 
     driver_text = (
         f"🚕 <b>НОВЫЙ ЗАКАЗ №{request_id}</b>\n\n"
-        f"📍 <b>Откуда:</b> {from_place}\n"
-        f"🏁 <b>Куда:</b> {to_place}\n"
+        f"📍 <b>Откуда:</b> "
+        f"{escape_html(from_place)}\n"
+        f"🏁 <b>Куда:</b> "
+        f"{escape_html(to_place)}\n"
         f"{trip_type}\n"
-        f"📅 <b>Дата:</b> {date}\n"
-        f"🕐 <b>Время:</b> {time}\n"
-        f"👥 <b>Пассажиров:</b> {passengers}\n"
+        f"📅 <b>Дата:</b> "
+        f"{escape_html(date)}\n"
+        f"🕐 <b>Время:</b> "
+        f"{escape_html(time)}\n"
+        f"👥 <b>Пассажиров:</b> "
+        f"{escape_html(passengers)}\n"
     )
 
     if distance_km is not None:
 
         driver_text += (
             f"📏 <b>Расстояние:</b> "
-            f"{distance_km} км\n"
+            f"{escape_html(distance_km)} км\n"
         )
 
     if price is not None:
 
         driver_text += (
             f"💰 <b>Стоимость:</b> "
-            f"{format_price(price)}\n"
+            f"{escape_html(format_price(price))}\n"
         )
 
     print()
     print("=" * 60)
     print("ОТПРАВКА ЗАКАЗА ВОДИТЕЛЯМ")
     print("=" * 60)
+
     print(
         "DRIVERS CHAT ID:",
         get_drivers_chat_id()
     )
+
     print(
         "REQUEST ID:",
         request_id
     )
+
     print("=" * 60)
 
     try:
 
-        driver_message = await message.bot.send_message(
+        driver_message = await send_html_message(
+            message.bot,
             get_drivers_chat_id(),
             driver_text,
-            parse_mode="HTML",
             reply_markup=drivers_order_keyboard(
                 request_id
             )
         )
 
         print(
-            "✅ ЗАКАЗ ОТПРАВЛЕН В ГРУППУ ВОДИТЕЛЕЙ"
+            "✅ ЗАКАЗ ОТПРАВЛЕН "
+            "В ГРУППУ ВОДИТЕЛЕЙ"
         )
 
         print(
@@ -760,7 +1092,8 @@ async def handle_message(message: Message):
 
         print()
         print(
-            "❌ ОШИБКА ОТПРАВКИ ЗАКАЗА ВОДИТЕЛЯМ"
+            "❌ ОШИБКА ОТПРАВКИ "
+            "ЗАКАЗА ВОДИТЕЛЯМ"
         )
 
         print(
@@ -794,15 +1127,19 @@ async def handle_message(message: Message):
         one_time_keyboard=True
     )
 
-    await message.answer(
+    await send_html_message(
+        message.bot,
+        message.chat.id,
         client_result,
-        parse_mode="HTML",
         reply_markup=phone_keyboard
     )
 
     print()
     print("=" * 60)
     print("ОБРАБОТКА ЗАЯВКИ ЗАВЕРШЕНА")
-    print("НОМЕР ЗАКАЗА:", request_id)
+    print(
+        "НОМЕР ЗАКАЗА:",
+        request_id
+    )
     print("=" * 60)
     print()

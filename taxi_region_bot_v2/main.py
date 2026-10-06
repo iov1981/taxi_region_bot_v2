@@ -11,24 +11,19 @@ from app.handlers.start import router as start_router
 from app.handlers.admin import router as admin_router
 from app.handlers.drivers import router as drivers_router
 from app.handlers.test_order import router as test_order_router
+from app.handlers.test_real_order import router as test_real_order_router
 from app.handlers.messages import router as messages_router
 
 
 # ============================================================
 # ЗАГРУЗКА .ENV
-#
-# Локально .env находится в корне проекта:
-# G:/taxi_region_bot_v2/.env
-#
-# На Render переменные будут передаваться через Environment
-# Variables, поэтому load_dotenv() просто ничего не изменит.
 # ============================================================
 
 load_dotenv()
 
 
 # ============================================================
-# HTTP-СЕРВЕР ДЛЯ RENDER
+# HTTP-СЕРВЕР
 # ============================================================
 
 async def health(request):
@@ -38,6 +33,7 @@ async def health(request):
 
 
 async def start_web_server():
+
     app = web.Application()
 
     app.router.add_get(
@@ -57,7 +53,9 @@ async def start_web_server():
         )
     )
 
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(
+        app
+    )
 
     await runner.setup()
 
@@ -142,7 +140,7 @@ async def start_bot():
     # ========================================================
     # ROUTERS
     #
-    # test_order подключаем ДО messages,
+    # test_order и test_real_order подключаем ДО messages,
     # потому что messages обрабатывает обычный текст.
     # ========================================================
 
@@ -163,6 +161,10 @@ async def start_bot():
     )
 
     dp.include_router(
+        test_real_order_router
+    )
+
+    dp.include_router(
         messages_router
     )
 
@@ -179,7 +181,13 @@ async def start_bot():
     )
 
     print(
-        "Порядок routers: start -> admin -> drivers -> test_order -> messages"
+        "Тестовый обработчик /test_real_order подключён."
+    )
+
+    print(
+        "Порядок routers: "
+        "start -> admin -> drivers -> "
+        "test_order -> test_real_order -> messages"
     )
 
     try:
@@ -200,7 +208,7 @@ async def start_bot():
 async def main():
 
     # ========================================================
-    # СНАЧАЛА HTTP-СЕРВЕР
+    # HTTP-СЕРВЕР
     # ========================================================
 
     web_runner = await start_web_server()

@@ -1,5 +1,6 @@
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import get_admin_id
@@ -26,16 +27,8 @@ print("drivers.py загружен")
 #     "message_id": ID сообщения
 # }
 #
-# Например:
-#
-# 17 -> {
-#     "chat_id": -5597678940,
-#     "message_id": 307
-# }
-#
-# Это нужно для того, чтобы после назначения водителя
-# удалить кнопку «🟢 БЕРУ ЗАКАЗ» именно из сообщения
-# в группе водителей.
+# Это нужно для удаления кнопки
+# «🟢 БЕРУ ЗАКАЗ» после назначения водителя.
 #
 
 driver_order_messages = {}
@@ -58,6 +51,349 @@ def driver_accept_keyboard(
     )
 
     return builder.as_markup()
+
+
+# ============================================================
+# ТЕСТОВЫЙ ВОДИТЕЛЬ
+# ============================================================
+#
+# Команда только для администратора:
+#
+# /test_driver 23
+#
+# Имитирует ситуацию, когда водитель нажал
+# кнопку «🟢 БЕРУ ЗАКАЗ».
+#
+# Используем Telegram ID администратора как ID
+# тестового водителя.
+#
+
+@router.message(
+    Command("test_driver")
+)
+async def test_driver(
+        message: Message
+):
+
+    print()
+    print("=" * 60)
+    print("ПОЛУЧЕНА КОМАНДА /test_driver")
+    print("=" * 60)
+
+    print(
+        "USER ID:",
+        message.from_user.id
+    )
+
+    print(
+        "TEXT:",
+        message.text
+    )
+
+    print("=" * 60)
+
+    # ========================================================
+    # ПРОВЕРКА АДМИНИСТРАТОРА
+    # ========================================================
+
+    if message.from_user.id != get_admin_id():
+
+        print(
+            "⛔ Доступ запрещён."
+        )
+
+        return
+
+    # ========================================================
+    # ПОЛУЧАЕМ НОМЕР ЗАКАЗА
+    # ========================================================
+
+    command_text = message.text or ""
+
+    parts = command_text.split(
+        maxsplit=1
+    )
+
+    if len(parts) < 2:
+
+        await message.answer(
+            "🧪 <b>ТЕСТ ВОДИТЕЛЯ</b>\n\n"
+            "Укажите номер заказа.\n\n"
+            "<b>Пример:</b>\n"
+            "/test_driver 23",
+            parse_mode="HTML"
+        )
+
+        return
+
+    try:
+
+        request_id = int(
+            parts[1].strip()
+        )
+
+    except ValueError:
+
+        await message.answer(
+            "❌ Номер заказа должен быть числом.\n\n"
+            "Пример:\n"
+            "/test_driver 23"
+        )
+
+        return
+
+    print(
+        "TEST REQUEST ID:",
+        request_id
+    )
+
+    # ========================================================
+    # ПОЛУЧАЕМ ЗАКАЗ
+    # ========================================================
+
+    request = await get_request(
+        request_id
+    )
+
+    if not request:
+
+        print(
+            "❌ ЗАКАЗ НЕ НАЙДЕН:",
+            request_id
+        )
+
+        await message.answer(
+            f"❌ Заказ №{request_id} не найден."
+        )
+
+        return
+
+    print(
+        "✅ ЗАКАЗ НАЙДЕН"
+    )
+
+    print(
+        "STATUS:",
+        request["status"]
+    )
+
+    # ========================================================
+    # ПРОВЕРЯЕМ СТАТУС
+    # ========================================================
+
+    if request["status"] != "new":
+
+        await message.answer(
+            f"⚠️ Заказ №{request_id} "
+            f"уже имеет статус: "
+            f"{request['status']}"
+        )
+
+        return
+
+    # ========================================================
+    # ТЕСТОВЫЙ ВОДИТЕЛЬ
+    # ========================================================
+
+    driver_id = message.from_user.id
+
+    driver_username = (
+        message.from_user.username
+    )
+
+    driver_first_name = (
+        message.from_user.first_name
+        or "Тестовый водитель"
+    )
+
+    if driver_username:
+
+        driver_name = (
+            f"@{driver_username}"
+        )
+
+    else:
+
+        driver_name = driver_first_name
+
+    print()
+    print("=" * 60)
+    print("ТЕСТОВЫЙ ВОДИТЕЛЬ")
+    print("=" * 60)
+
+    print(
+        "DRIVER ID:",
+        driver_id
+    )
+
+    print(
+        "USERNAME:",
+        driver_username
+    )
+
+    print(
+        "NAME:",
+        driver_first_name
+    )
+
+    print(
+        "DISPLAY NAME:",
+        driver_name
+    )
+
+    print("=" * 60)
+
+    # ========================================================
+    # ДОБАВЛЯЕМ ВОДИТЕЛЯ В СПИСОК ЖЕЛАЮЩИХ
+    # ========================================================
+
+    success, result = await add_driver_request(
+        request_id,
+        driver_id,
+        driver_username,
+        driver_first_name
+    )
+
+    print()
+    print("=" * 60)
+    print("РЕЗУЛЬТАТ ТЕСТОВОГО ОТКЛИКА")
+    print("=" * 60)
+
+    print(
+        "SUCCESS:",
+        success
+    )
+
+    print(
+        "RESULT:",
+        result
+    )
+
+    print("=" * 60)
+
+    # ========================================================
+    # ЕСЛИ ВОДИТЕЛЬ УЖЕ ЕСТЬ
+    # ========================================================
+
+    if not success:
+
+        if result == "already_waiting":
+
+            await message.answer(
+                f"ℹ️ Тестовый водитель уже "
+                f"предложил себя на заказ №{request_id}."
+            )
+
+            return
+
+        if result == "taken":
+
+            await message.answer(
+                f"⚠️ Заказ №{request_id} "
+                f"уже назначен."
+            )
+
+            return
+
+        await message.answer(
+            "❌ Не удалось добавить "
+            "тестового водителя."
+        )
+
+        return
+
+    # ========================================================
+    # ИМИТИРУЕМ УВЕДОМЛЕНИЕ АДМИНИСТРАТОРУ
+    # ========================================================
+
+    admin_text = (
+        f"🧪 <b>ТЕСТ: ВОДИТЕЛЬ ХОЧЕТ "
+        f"ЗАКАЗ №{request_id}</b>\n\n"
+        f"👤 <b>Водитель:</b> {driver_name}\n"
+        f"🆔 <b>ID:</b> {driver_id}\n\n"
+    )
+
+    if request["ai_summary"]:
+
+        admin_text += (
+            "📋 <b>Заказ:</b>\n"
+            f"{request['ai_summary']}\n\n"
+        )
+
+    if request["phone"]:
+
+        admin_text += (
+            "📱 <b>Телефон клиента:</b> "
+            f"{request['phone']}\n\n"
+        )
+
+    admin_text += (
+        "👇 <b>Назначить этого водителя?</b>"
+    )
+
+    try:
+
+        await message.bot.send_message(
+            get_admin_id(),
+            admin_text,
+            parse_mode="HTML",
+            reply_markup=driver_accept_keyboard(
+                request_id,
+                driver_id
+            )
+        )
+
+        print()
+        print("=" * 60)
+        print("✅ ТЕСТОВЫЙ ВОДИТЕЛЬ ОТПРАВЛЕН АДМИНИСТРАТОРУ")
+        print("=" * 60)
+
+        print(
+            "REQUEST ID:",
+            request_id
+        )
+
+        print(
+            "DRIVER ID:",
+            driver_id
+        )
+
+        print("=" * 60)
+
+    except Exception as error:
+
+        print()
+        print(
+            "❌ ОШИБКА ОТПРАВКИ ТЕСТОВОГО "
+            "ВОДИТЕЛЯ АДМИНИСТРАТОРУ"
+        )
+
+        print(
+            type(error).__name__,
+            repr(error)
+        )
+
+        await message.answer(
+            "❌ Водитель записан, "
+            "но не удалось отправить "
+            "уведомление администратору."
+        )
+
+        return
+
+    # ========================================================
+    # ОТВЕТ АДМИНИСТРАТОРУ
+    # ========================================================
+
+    await message.answer(
+        f"✅ <b>Тестовый отклик создан.</b>\n\n"
+        f"🚕 Заказ №{request_id}\n"
+        f"👤 Водитель: {driver_name}\n\n"
+        "Теперь в сообщении администратора "
+        "нажмите:\n"
+        "✅ <b>Принять водителя</b>",
+        parse_mode="HTML"
+    )
 
 
 # ============================================================
@@ -649,7 +985,6 @@ async def assign_driver_callback(
                 reply_markup=None
             )
 
-            print()
             print(
                 "✅ КНОПКА «БЕРУ ЗАКАЗ» УДАЛЕНА"
             )
@@ -657,16 +992,6 @@ async def assign_driver_callback(
             print(
                 "REQUEST ID:",
                 request_id
-            )
-
-            print(
-                "GROUP CHAT ID:",
-                group_chat_id
-            )
-
-            print(
-                "MESSAGE ID:",
-                group_message_id
             )
 
             print("=" * 60)
@@ -678,7 +1003,6 @@ async def assign_driver_callback(
 
         except Exception as error:
 
-            print()
             print(
                 "❌ ОШИБКА УДАЛЕНИЯ КНОПКИ "
                 "В ГРУППЕ ВОДИТЕЛЕЙ"

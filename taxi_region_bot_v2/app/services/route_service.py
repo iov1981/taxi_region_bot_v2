@@ -1,1500 +1,1104 @@
+
 import os
 import re
-import math
-from typing import Optional, Tuple, Dict, Any
-
 import aiohttp
+
 from dotenv import load_dotenv
 
+load_dotenv()
+
 
 # ============================================================
-# ENV
+# НАСТРОЙКИ
 # ============================================================
 
-load_dotenv("G:/taxi_region_bot_v2/.env")
-
-ORS_API_KEY = os.getenv("OPENROUTESERVICE_API_KEY")
+ORS_API_KEY = os.getenv("ORS_API_KEY")
 GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY")
 
-ORS_GEOCODE_URL = "https://api.openrouteservice.org/geocode/search"
-ORS_ROUTE_URL = "https://api.openrouteservice.org/v2/directions/driving-car"
-GEOAPIFY_URL = "https://api.geoapify.com/v1/geocode/search"
+MAX_ALLOWED_HOUSE_NUMBER = 999
+
+
+print()
+print("=" * 60)
+print("ROUTE SERVICE V2.7")
+print("ORS_API_KEY:", "OK" if ORS_API_KEY else "НЕТ")
+print("GEOAPIFY_API_KEY:", "OK" if GEOAPIFY_API_KEY else "НЕТ")
+print("MAX_ALLOWED_HOUSE_NUMBER:", MAX_ALLOWED_HOUSE_NUMBER)
+print("=" * 60)
 
 
 # ============================================================
-# ГРАНИЦЫ ПЕНЗЕНСКОЙ ОБЛАСТИ
+# ОБЩИЕ ФУНКЦИИ
 # ============================================================
 
-PENZA_MIN_LON = 42.5
-PENZA_MAX_LON = 47.5
-PENZA_MIN_LAT = 51.8
-PENZA_MAX_LAT = 55.5
-
-
-# ============================================================
-# ПРОВЕРЕННЫЕ ЦЕНТРЫ НАСЕЛЁННЫХ ПУНКТОВ
-# ============================================================
-#
-# Эти координаты используются только когда нужен центр
-# населённого пункта, а не конкретный дом.
-#
-# Особенно важно для Воробьёвки:
-# Geoapify может находить одноимённый населённый пункт
-# в совершенно другой точке.
-#
-
-VERIFIED_LOCALITY_COORDS = {
-    # Пенза
-    "пенза": (45.0067413, 53.1937836),
-
-    # Воробьевка / Воробьёвка
-    "воробьевка": (45.24727, 52.81497),
-    "воробьёвка": (45.24727, 52.81497),
-}
-
-
-# ============================================================
-# КРУПНЫЕ НАСЕЛЁННЫЕ ПУНКТЫ
-# ============================================================
-
-LARGE_LOCALITIES = {
-    "пенза",
-    "заречный",
-    "кузнецк",
-    "сердобск",
-    "каменка",
-    "нижний ломов",
-    "никольск",
-    "белинский",
-    "городище",
-}
-
-
-# ============================================================
-# НАСЕЛЁННЫЕ ПУНКТЫ
-# ============================================================
-
-CITY_LOCALITIES = {
-    "пенза",
-    "заречный",
-    "кузнецк",
-    "сердобск",
-    "каменка",
-    "нижний ломов",
-    "никольск",
-    "белинский",
-    "городище",
-    "бессоновка",
-    "засечное",
-    "чемодановка",
-    "мокшан",
-    "лунино",
-    "шемышейка",
-    "воробьевка",
-    "воробьёвка",
-}
-
-
-# ============================================================
-# СООТВЕТСТВИЯ РУССКИХ И ЛАТИНСКИХ НАЗВАНИЙ
-# ============================================================
-
-LOCALITY_ALIASES = {
-    "penza": "пенза",
-    "penza oblast": "пенза",
-
-    "воробьевка": "воробьевка",
-    "воробьёвка": "воробьевка",
-
-    "vorobevka": "воробьевка",
-    "vorobyovka": "воробьевка",
-    "vorobyevka": "воробьевка",
-    "vorobievka": "воробьевка",
-}
-
-
-# ============================================================
-# НОРМАЛИЗАЦИЯ ТЕКСТА
-# ============================================================
-
-def normalize_text(value: Optional[str]) -> str:
-    if not value:
+def normalize_text(value):
+    if value is None:
         return ""
 
     value = str(value).strip().lower()
-
     value = value.replace("ё", "е")
-
-    value = re.sub(r"[«»\"']", "", value)
     value = re.sub(r"\s+", " ", value)
+
+    return value
+
+
+def normalize_street_name(value):
+    value = normalize_text(value)
+
+    # Типы улиц.
+    value = re.sub(
+        r"\b(?:улица|ул)\.?\b",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\b(?:проспект|просп|пр-т)\.?\b",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\b(?:переулок|пер)\.?\b",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\b(?:шоссе|ш)\.?\b",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\b(?:площадь|пл)\.?\b",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\b(?:бульвар|бул)\.?\b",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\b(?:набережная|наб)\.?\b",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\b(?:проезд|пр-д)\.?\b",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"[,\.;:]",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value
+    )
 
     return value.strip()
 
 
-# ============================================================
-# НОРМАЛИЗАЦИЯ НАЗВАНИЯ НАСЕЛЁННОГО ПУНКТА
-# ============================================================
-
-def normalize_locality_name(value: Optional[str]) -> str:
-    if not value:
+def normalize_house_number(value):
+    if value is None:
         return ""
 
-    value = normalize_text(value)
+    value = str(value).strip().lower()
+    value = re.sub(r"\s+", "", value)
 
-    # После normalize_text:
-    # ё -> е
-    #
-    # Поэтому Воробьёвка превращается в Воробьевка.
+    value = value.replace("корпус", "к")
+    value = value.replace("корп.", "к")
+    value = value.replace("корп", "к")
 
-    aliases = {
-        "penza": "пенза",
-        "penza oblast": "пенза",
+    value = value.replace("строение", "стр")
+    value = value.replace("ст.", "стр")
 
-        "воробьевка": "воробьевка",
-
-        "vorobevka": "воробьевка",
-        "vorobyovka": "воробьевка",
-        "vorobyevka": "воробьевка",
-        "vorobievka": "воробьевка",
-    }
-
-    return aliases.get(value, value)
-
-
-# ============================================================
-# СРАВНЕНИЕ НАЗВАНИЙ НАСЕЛЁННЫХ ПУНКТОВ
-# ============================================================
-
-def locality_names_match(
-    first: Optional[str],
-    second: Optional[str]
-) -> bool:
-
-    first_normalized = normalize_locality_name(first)
-    second_normalized = normalize_locality_name(second)
-
-    if not first_normalized or not second_normalized:
-        return False
-
-    return first_normalized == second_normalized
-
-
-# ============================================================
-# ПРОВЕРКА КООРДИНАТ
-# ============================================================
-
-def is_inside_penza_region(
-    longitude: float,
-    latitude: float
-) -> bool:
-
-    return (
-        PENZA_MIN_LON <= longitude <= PENZA_MAX_LON
-        and
-        PENZA_MIN_LAT <= latitude <= PENZA_MAX_LAT
-    )
+    return value
 
 
 # ============================================================
 # НОМЕР ДОМА
 # ============================================================
 
-def has_house_number(address: Optional[str]) -> bool:
-    if not address:
-        return False
+def get_house_pattern():
+    """
+    Поддерживаем:
 
-    text = normalize_text(address)
+        10
+        10А
+        10а
+        25/1
+        25-27
+        25к1
+        25 к 1
+        25стр1
+        25 стр 1
+    """
 
-    return bool(
-        re.search(
-            r"(?:дом|д\.?|№)?\s*"
-            r"\d+[а-яa-z]?"
-            r"(?:[\/\-]\d+[а-яa-z]?)?",
-            text
-        )
+    return (
+        r"\d+"
+        r"(?:"
+        r"\s*/\s*\d+"
+        r"|"
+        r"\s*-\s*\d+"
+        r"|"
+        r"\s*[кК]\s*\d+"
+        r"|"
+        r"\s*стр\.?\s*\d+"
+        r"|"
+        r"[А-Яа-яЁёA-Za-z]"
+        r")?"
     )
 
 
-def extract_house_number(
-    address: Optional[str]
-) -> Optional[str]:
-
+def extract_house_number(address):
     if not address:
         return None
 
-    text = normalize_text(address)
+    pattern = get_house_pattern()
 
     match = re.search(
-        r"(?:дом|д\.?|№)?\s*"
-        r"(\d+[а-яa-z]?"
-        r"(?:[\/\-]\d+[а-яa-z]?)?)",
-        text
+        rf"(?<!\d)({pattern})(?!\d)",
+        str(address),
+        flags=re.IGNORECASE
     )
 
-    if match:
-        return match.group(1)
+    if not match:
+        return None
 
-    return None
+    return normalize_house_number(
+        match.group(1)
+    )
+
+
+def has_house_number(address):
+    return extract_house_number(address) is not None
+
+
+def get_main_house_number(house_number):
+    if not house_number:
+        return None
+
+    match = re.match(
+        r"(\d+)",
+        normalize_house_number(house_number)
+    )
+
+    if not match:
+        return None
+
+    return int(match.group(1))
+
+
+def is_house_number_allowed(house_number):
+    main_number = get_main_house_number(
+        house_number
+    )
+
+    if main_number is None:
+        return False
+
+    return main_number <= MAX_ALLOWED_HOUSE_NUMBER
 
 
 # ============================================================
-# НАЗВАНИЕ УЛИЦЫ
+# УЛИЦА
 # ============================================================
 
-def extract_street_name(
-    address: Optional[str]
-) -> Optional[str]:
+def extract_street_name(address):
+    """
+    Извлекает название улицы.
+
+    Примеры:
+
+        Пенза, Московская, 29
+        -> московская
+
+        Пенза, улица Московская, 29
+        -> московская
+
+        Пенза, ул. Московская, 29
+        -> московская
+
+        Пенза, проспект Победы, 10
+        -> победы
+
+        Пенза
+        -> None
+    """
 
     if not address:
         return None
 
-    text = normalize_text(address)
+    text = str(address).strip()
 
-    text = re.sub(
-        r"\b(?:дом|д\.?)\s*"
-        r"\d+[а-яa-z]?"
-        r"(?:[\/\-]\d+[а-яa-z]?)?",
-        "",
-        text
-    )
+    # --------------------------------------------------------
+    # Удаляем номер дома.
+    # --------------------------------------------------------
 
-    text = re.sub(
-        r"\b\d+[а-яa-z]?"
-        r"(?:[\/\-]\d+[а-яa-z]?)?\b",
-        "",
-        text
-    )
+    house = extract_house_number(text)
 
-    # Убираем название населённого пункта
-    locality = extract_requested_locality(text)
+    if house:
+        pattern = get_house_pattern()
 
-    if locality:
-        text = re.sub(
-            re.escape(locality),
+        text_without_house = re.sub(
+            rf"(?<!\d){pattern}(?!\d)",
             "",
             text,
+            count=1,
+            flags=re.IGNORECASE
+        )
+    else:
+        text_without_house = text
+
+    text_without_house = re.sub(
+        r"\s+",
+        " ",
+        text_without_house
+    ).strip(" ,;.")
+
+    if not text_without_house:
+        return None
+
+    # --------------------------------------------------------
+    # Известные населённые пункты.
+    # --------------------------------------------------------
+
+    known_places = {
+        "пенза",
+        "саратов",
+        "заречный",
+        "воробьевка",
+        "воробьевку",
+        "воробьёвка",
+        "воробьёвку",
+        "кузнецк",
+        "сердобск",
+        "каменка",
+        "нижний ломов",
+        "никольск",
+        "энгельс",
+        "балаково",
+        "вольск",
+        "саранск",
+        "рузаевка",
+        "темников",
+    }
+
+    parts = [
+        part.strip()
+        for part in re.split(
+            r",",
+            text_without_house
+        )
+        if part.strip()
+    ]
+
+    # --------------------------------------------------------
+    # Формат:
+    #
+    # Пенза, улица Комсомольская
+    # --------------------------------------------------------
+
+    if len(parts) >= 2:
+
+        for part in reversed(parts):
+
+            normalized = normalize_text(part)
+
+            if normalized in known_places:
+                continue
+
+            street = normalize_street_name(part)
+
+            if street:
+                return street
+
+        return None
+
+    # --------------------------------------------------------
+    # Формат:
+    #
+    # Пенза улица Комсомольская
+    # --------------------------------------------------------
+
+    only_part = normalize_text(
+        parts[0] if parts else text_without_house
+    )
+
+    for place in sorted(
+        known_places,
+        key=len,
+        reverse=True
+    ):
+
+        pattern = (
+            r"^"
+            + re.escape(place)
+            + r"(?:\s+|,\s*)"
+        )
+
+        only_part = re.sub(
+            pattern,
+            "",
+            only_part,
             flags=re.IGNORECASE
         )
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
+    street = normalize_street_name(
+        only_part
     )
 
-    text = text.strip(" ,.-")
-
-    return text or None
-
-
-# ============================================================
-# ОПРЕДЕЛЕНИЕ НАСЕЛЁННОГО ПУНКТА
-# ============================================================
-
-def extract_requested_locality(
-    address: Optional[str]
-) -> Optional[str]:
-
-    if not address:
+    if not street:
         return None
 
-    text = normalize_text(address)
+    return street
 
-    # Сначала длинные названия
-    known_localities = sorted(
-        CITY_LOCALITIES,
-        key=len,
-        reverse=True
+
+def streets_match(requested_street, found_street):
+    requested = normalize_street_name(
+        requested_street
     )
 
-    for locality in known_localities:
-
-        if locality in text:
-
-            return normalize_locality_name(
-                locality
-            )
-
-    # Дополнительная проверка латиницы
-    for alias, canonical in LOCALITY_ALIASES.items():
-
-        if alias in text:
-
-            return canonical
-
-    return None
-
-
-# ============================================================
-# ТИП НАСЕЛЁННОГО ПУНКТА
-# ============================================================
-
-def get_locality_type(
-    locality: Optional[str]
-) -> str:
-
-    locality = normalize_locality_name(
-        locality
+    found = normalize_street_name(
+        found_street
     )
 
-    if not locality:
-        return "unknown"
-
-    if locality in LARGE_LOCALITIES:
-        return "large"
-
-    if locality in CITY_LOCALITIES:
-        return "small"
-
-    return "unknown"
-
-
-def can_use_locality_fallback(
-    locality: Optional[str]
-) -> bool:
-
-    locality = normalize_locality_name(
-        locality
-    )
-
-    if not locality:
+    if not requested or not found:
         return False
 
-    return locality in CITY_LOCALITIES
+    if requested == found:
+        return True
 
+    if requested in found:
+        return True
 
-# ============================================================
-# GEOAPIFY FEATURE
-# ============================================================
-
-def get_feature_layer(
-    feature: Dict[str, Any]
-) -> Dict[str, Any]:
-
-    return feature.get("properties") or {}
-
-
-# ============================================================
-# ПРОВЕРКА НАСЕЛЁННОГО ПУНКТА
-# ============================================================
-
-def feature_belongs_to_locality(
-    feature: Dict[str, Any],
-    requested_locality: str
-) -> bool:
-
-    properties = get_feature_layer(
-        feature
-    )
-
-    requested = normalize_locality_name(
-        requested_locality
-    )
-
-    fields = [
-        properties.get("city"),
-        properties.get("town"),
-        properties.get("village"),
-        properties.get("locality"),
-    ]
-
-    for value in fields:
-
-        if locality_names_match(
-            value,
-            requested
-        ):
-            return True
+    if found in requested:
+        return True
 
     return False
 
 
 # ============================================================
-# ОЦЕНКА GEOAPIFY
+# НАСЕЛЁННЫЙ ПУНКТ
 # ============================================================
 
-def score_feature(
-    feature: Dict[str, Any],
-    requested_locality: str,
-    requested_address: Optional[str] = None
-) -> int:
+def extract_locality_from_address(address):
+    if not address:
+        return None
 
-    properties = get_feature_layer(
-        feature
+    text = normalize_text(address)
+
+    known_places = (
+        "пенза",
+        "саратов",
+        "заречный",
+        "воробьевка",
+        "воробьевку",
+        "воробьёвка",
+        "воробьёвку",
+        "кузнецк",
+        "сердобск",
+        "каменка",
+        "нижний ломов",
+        "никольск",
+        "энгельс",
+        "балаково",
+        "вольск",
+        "саранск",
+        "рузаевка",
+        "темников",
     )
 
-    requested = normalize_locality_name(
+    for place in sorted(
+        known_places,
+        key=len,
+        reverse=True
+    ):
+
+        if place in text:
+
+            if "воробьев" in place:
+                return "воробьевка"
+
+            if "воробьёв" in place:
+                return "воробьевка"
+
+            return place
+
+    return None
+
+
+def get_result_locality(properties):
+    if not properties:
+        return ""
+
+    fields = (
+        "city",
+        "town",
+        "village",
+        "municipality",
+        "county",
+        "locality",
+    )
+
+    for field in fields:
+
+        value = properties.get(field)
+
+        if value:
+            return normalize_text(value)
+
+    return ""
+
+
+def locality_matches(
+    requested_locality,
+    properties
+):
+    if not requested_locality:
+        return True
+
+    requested = normalize_text(
         requested_locality
     )
 
-    score = 0
+    found = get_result_locality(
+        properties
+    )
 
-    name = properties.get("name")
-    city = properties.get("city")
-    town = properties.get("town")
-    village = properties.get("village")
-    locality = properties.get("locality")
-    municipality = properties.get("municipality")
+    if not found:
+        return False
 
-    # --------------------------------------------------------
-    # НАЗВАНИЕ
-    # --------------------------------------------------------
+    if requested == found:
+        return True
 
-    if locality_names_match(
-        name,
-        requested
-    ):
-        score += 100
+    if requested in found:
+        return True
 
-    # --------------------------------------------------------
-    # СТРУКТУРНЫЕ ПОЛЯ
-    # --------------------------------------------------------
+    if found in requested:
+        return True
 
-    if locality_names_match(
-        city,
-        requested
-    ):
-        score += 100
+    return False
 
-    if locality_names_match(
-        town,
-        requested
-    ):
-        score += 100
 
-    if locality_names_match(
-        village,
-        requested
-    ):
-        score += 100
+# ============================================================
+# РЕГИОН
+# ============================================================
 
-    if locality_names_match(
-        locality,
-        requested
-    ):
-        score += 100
+def normalize_region(value):
+    value = normalize_text(value)
 
-    # municipality НЕ используем как подтверждение
-    # населённого пункта.
+    value = value.replace(
+        "область",
+        ""
+    ).strip()
 
-    # --------------------------------------------------------
-    # ОБЛАСТЬ
-    # --------------------------------------------------------
+    return value
 
-    state = normalize_text(
+
+def region_matches(
+    requested_region,
+    properties
+):
+    if not requested_region:
+        return True
+
+    requested = normalize_region(
+        requested_region
+    )
+
+    found = (
         properties.get("state")
-        or ""
+        or properties.get("region")
     )
 
-    formatted = normalize_text(
-        properties.get("formatted")
-        or ""
+    if not found:
+        return False
+
+    found = normalize_region(found)
+
+    return (
+        requested == found
+        or requested in found
+        or found in requested
     )
+
+
+def detect_region(address):
+    text = normalize_text(address)
 
     if (
-        "пензенская область" in state
-        or
-        "penza oblast" in state
-        or
-        "пензенская область" in formatted
-        or
-        "penza oblast" in formatted
+        "пенза" in text
+        or "заречн" in text
+        or "воробьев" in text
+        or "воробьёв" in text
     ):
-        score += 50
+        return "Пензенская область"
 
-    # --------------------------------------------------------
-    # ТОЧНЫЙ АДРЕС
-    # --------------------------------------------------------
+    if (
+        "саратов" in text
+        or "энгельс" in text
+        or "балаково" in text
+        or "вольск" in text
+    ):
+        return "Саратовская область"
 
-    if requested_address:
+    if (
+        "саранск" in text
+        or "рузаев" in text
+        or "темников" in text
+    ):
+        return "Республика Мордовия"
 
-        requested_house = extract_house_number(
-            requested_address
-        )
-
-        candidate_house = (
-            properties.get("housenumber")
-            or properties.get("house_number")
-            or properties.get("street_number")
-        )
-
-        if (
-            requested_house
-            and
-            candidate_house
-            and
-            normalize_text(
-                str(requested_house)
-            )
-            ==
-            normalize_text(
-                str(candidate_house)
-            )
-        ):
-            score += 300
-
-        requested_street = extract_street_name(
-            requested_address
-        )
-
-        candidate_street = (
-            properties.get("street")
-            or properties.get("street_name")
-        )
-
-        if (
-            requested_street
-            and
-            candidate_street
-        ):
-
-            requested_street_normalized = (
-                normalize_text(
-                    requested_street
-                )
-            )
-
-            candidate_street_normalized = (
-                normalize_text(
-                    candidate_street
-                )
-            )
-
-            if (
-                requested_street_normalized
-                in candidate_street_normalized
-                or
-                candidate_street_normalized
-                in requested_street_normalized
-            ):
-                score += 200
-
-    return score
+    return None
 
 
 # ============================================================
-# СТРОГАЯ ПРОВЕРКА ТОЧНОГО АДРЕСА
+# GEOAPIFY
 # ============================================================
 
-def address_matches_request(
-    feature: Dict[str, Any],
-    requested_address: str,
-    requested_locality: Optional[str]
-) -> bool:
+async def geoapify_request(
+    text,
+    bias_lat=None,
+    bias_lon=None
+):
+    if not GEOAPIFY_API_KEY:
 
-    properties = get_feature_layer(
-        feature
+        print(
+            "❌ GEOAPIFY_API_KEY отсутствует"
+        )
+
+        return []
+
+    url = (
+        "https://api.geoapify.com/"
+        "v1/geocode/search"
     )
 
-    # --------------------------------------------------------
-    # НАСЕЛЁННЫЙ ПУНКТ
-    # --------------------------------------------------------
+    params = {
+        "text": text,
+        "apiKey": GEOAPIFY_API_KEY,
+        "limit": 5,
+        "lang": "ru",
+    }
 
-    if requested_locality:
+    if (
+        bias_lat is not None
+        and bias_lon is not None
+    ):
 
-        if not feature_belongs_to_locality(
-            feature,
-            requested_locality
-        ):
-            print(
-                "  ❌ Населённый пункт "
-                "не совпадает."
-            )
+        params["bias"] = (
+            f"proximity:"
+            f"{bias_lon},"
+            f"{bias_lat}"
+        )
 
-            return False
+    try:
 
-    # --------------------------------------------------------
+        async with aiohttp.ClientSession() as session:
+
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(
+                    total=20
+                )
+            ) as response:
+
+                print(
+                    "GEOAPIFY HTTP:",
+                    response.status
+                )
+
+                if response.status != 200:
+
+                    body = await response.text()
+
+                    print(
+                        "GEOAPIFY RESPONSE:"
+                    )
+
+                    print(
+                        body[:1000]
+                    )
+
+                    return []
+
+                data = await response.json()
+
+                features = data.get(
+                    "features",
+                    []
+                )
+
+                print(
+                    "GEOAPIFY найдено результатов:",
+                    len(features)
+                )
+
+                return features
+
+    except Exception as error:
+
+        print(
+            "❌ Ошибка запроса Geoapify:",
+            repr(error)
+        )
+
+        return []
+
+
+# ============================================================
+# ДАННЫЕ GEOAPIFY
+# ============================================================
+
+def get_found_house(properties):
+    if not properties:
+        return None
+
+    house = (
+        properties.get("housenumber")
+        or properties.get("house_number")
+        or properties.get("street_number")
+    )
+
+    if house is None:
+        return None
+
+    return normalize_house_number(
+        house
+    )
+
+
+def get_found_street(properties):
+    if not properties:
+        return None
+
+    return (
+        properties.get("street")
+        or properties.get("street_name")
+        or properties.get("name")
+    )
+
+
+def get_result_type(properties):
+    if not properties:
+        return ""
+
+    return normalize_text(
+        properties.get("result_type")
+        or properties.get("type")
+        or ""
+    )
+
+
+# ============================================================
+# ПРОВЕРКА ТОЧНОГО АДРЕСА
+# ============================================================
+
+def exact_address_match(
+    properties,
+    requested_locality,
+    requested_region,
+    requested_street,
+    requested_house
+):
+    if not properties:
+        return False
+
+    found_house = get_found_house(
+        properties
+    )
+
+    found_street = get_found_street(
+        properties
+    )
+
+    result_type = get_result_type(
+        properties
+    )
+
+    print(
+        "  Найден тип:",
+        result_type
+    )
+
+    print(
+        "  Найдена улица:",
+        found_street
+    )
+
+    print(
+        "  Найден дом:",
+        found_house
+    )
+
+    # ========================================================
     # НОМЕР ДОМА
-    # --------------------------------------------------------
-
-    requested_house = extract_house_number(
-        requested_address
-    )
+    # ========================================================
 
     if requested_house:
 
-        candidate_house = (
-            properties.get("housenumber")
-            or properties.get("house_number")
-            or properties.get("street_number")
-        )
-
-        if not candidate_house:
+        if not found_house:
 
             print(
-                "  ❌ В кандидате нет номера дома."
+                "  ❌ Geoapify не вернул "
+                "номер дома."
             )
 
             return False
 
-        if normalize_text(
-            str(candidate_house)
-        ) != normalize_text(
-            str(requested_house)
+        if (
+            normalize_house_number(
+                requested_house
+            )
+            !=
+            normalize_house_number(
+                found_house
+            )
         ):
 
             print(
-                "  ❌ Номер дома не совпадает:"
-            )
-
-            print(
-                "     нужен:",
-                requested_house
-            )
-
-            print(
-                "     найден:",
-                candidate_house
+                "  ❌ Номер дома НЕ совпадает."
             )
 
             return False
 
-    # --------------------------------------------------------
-    # УЛИЦА
-    # --------------------------------------------------------
+        print(
+            "  ✅ Номер дома совпадает."
+        )
 
-    requested_street = extract_street_name(
-        requested_address
-    )
+    # ========================================================
+    # УЛИЦА
+    # ========================================================
 
     if requested_street:
 
-        candidate_street = (
-            properties.get("street")
-            or properties.get("street_name")
-        )
-
-        if not candidate_street:
+        if not found_street:
 
             print(
-                "  ❌ В кандидате нет улицы."
+                "  ❌ Geoapify не вернул "
+                "улицу."
             )
 
             return False
 
-        requested_street_normalized = (
-            normalize_text(
-                requested_street
-            )
-        )
-
-        candidate_street_normalized = (
-            normalize_text(
-                candidate_street
-            )
-        )
-
-        if (
-            requested_street_normalized
-            not in candidate_street_normalized
-            and
-            candidate_street_normalized
-            not in requested_street_normalized
+        if not streets_match(
+            requested_street,
+            found_street
         ):
 
             print(
-                "  ❌ Улица не совпадает:"
-            )
-
-            print(
-                "     нужна:",
-                requested_street
-            )
-
-            print(
-                "     найдена:",
-                candidate_street
+                "  ❌ Улица НЕ совпадает."
             )
 
             return False
 
-    return True
-
-
-# ============================================================
-# ВОЗДУШНОЕ РАССТОЯНИЕ
-# ============================================================
-
-def calculate_air_distance_km(
-    lon1: float,
-    lat1: float,
-    lon2: float,
-    lat2: float
-) -> float:
-
-    radius = 6371.0
-
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-
-    d_phi = math.radians(
-        lat2 - lat1
-    )
-
-    d_lambda = math.radians(
-        lon2 - lon1
-    )
-
-    a = (
-        math.sin(d_phi / 2) ** 2
-        +
-        math.cos(phi1)
-        * math.cos(phi2)
-        * math.sin(d_lambda / 2) ** 2
-    )
-
-    c = 2 * math.atan2(
-        math.sqrt(a),
-        math.sqrt(1 - a)
-    )
-
-    return radius * c
-
-
-# ============================================================
-# PATTERN
-# ============================================================
-
-def get_place_pattern(
-    locality: str
-) -> str:
-
-    locality = normalize_locality_name(
-        locality
-    )
-
-    if locality in LARGE_LOCALITIES:
-        return "city"
-
-    return "locality"
-
-
-# ============================================================
-# GEOAPIFY — ТОЧНЫЙ АДРЕС
-# ============================================================
-
-async def geocode_address_geoapify(
-    address: str,
-    requested_locality: Optional[str] = None
-) -> Optional[Tuple[float, float]]:
-
-    if not GEOAPIFY_API_KEY:
-
         print(
-            "GEOAPIFY_API_KEY не найден."
+            "  ✅ Улица совпадает."
         )
 
-        return None
+    # ========================================================
+    # НАСЕЛЁННЫЙ ПУНКТ
+    # ========================================================
 
-    print()
-    print(
-        "GEOAPIFY: поиск точного адреса"
-    )
+    if requested_locality:
 
-    print(
-        "  запрос:",
-        address
-    )
-
-    params = {
-        "text": address,
-        "apiKey": GEOAPIFY_API_KEY,
-        "limit": 10,
-        "filter": (
-            f"rect:"
-            f"{PENZA_MIN_LON},"
-            f"{PENZA_MIN_LAT},"
-            f"{PENZA_MAX_LON},"
-            f"{PENZA_MAX_LAT}"
-        ),
-    }
-
-    try:
-
-        async with aiohttp.ClientSession() as session:
-
-            async with session.get(
-                GEOAPIFY_URL,
-                params=params,
-                timeout=20
-            ) as response:
-
-                print(
-                    "  HTTP:",
-                    response.status
-                )
-
-                if response.status != 200:
-
-                    text = await response.text()
-
-                    print(
-                        "  ❌ GEOAPIFY HTTP error:",
-                        text[:500]
-                    )
-
-                    return None
-
-                data = await response.json()
-
-    except Exception as error:
-
-        print(
-            "  ❌ Ошибка GEOAPIFY:",
-            repr(error)
-        )
-
-        return None
-
-    features = data.get(
-        "features"
-    ) or []
-
-    if not features:
-
-        print(
-            "  ❌ GEOAPIFY не вернул "
-            "кандидатов."
-        )
-
-        return None
-
-    best_feature = None
-    best_score = -100000
-
-    for index, feature in enumerate(
-        features,
-        start=1
-    ):
-
-        properties = get_feature_layer(
-            feature
-        )
-
-        geometry = feature.get(
-            "geometry"
-        ) or {}
-
-        coordinates = geometry.get(
-            "coordinates"
-        )
-
-        if (
-            not coordinates
-            or
-            len(coordinates) < 2
+        if not locality_matches(
+            requested_locality,
+            properties
         ):
-            continue
 
-        lon = float(
-            coordinates[0]
-        )
-
-        lat = float(
-            coordinates[1]
-        )
-
-        if not is_inside_penza_region(
-            lon,
-            lat
-        ):
-            continue
-
-        score = score_feature(
-            feature,
-            requested_locality or "",
-            address
-        )
-
-        print()
-        print(
-            f"  КАНДИДАТ GEOAPIFY #{index}"
-        )
-
-        print(
-            "    name:",
-            properties.get("name")
-        )
-
-        print(
-            "    formatted:",
-            properties.get("formatted")
-        )
-
-        print(
-            "    city:",
-            properties.get("city")
-        )
-
-        print(
-            "    town:",
-            properties.get("town")
-        )
-
-        print(
-            "    village:",
-            properties.get("village")
-        )
-
-        print(
-            "    locality:",
-            properties.get("locality")
-        )
-
-        print(
-            "    street:",
-            properties.get("street")
-        )
-
-        print(
-            "    housenumber:",
-            properties.get("housenumber")
-        )
-
-        print(
-            "    SCORE:",
-            score
-        )
-
-        if score > best_score:
-
-            best_score = score
-            best_feature = feature
-
-    if not best_feature:
-
-        print(
-            "  ❌ Подходящий адрес "
-            "не найден."
-        )
-
-        return None
-
-    # --------------------------------------------------------
-    # СТРОГАЯ ПРОВЕРКА
-    # --------------------------------------------------------
-
-    if not address_matches_request(
-        best_feature,
-        address,
-        requested_locality
-    ):
-
-        print()
-        print(
-            "  ❌ Лучший кандидат "
-            "НЕ прошёл строгую "
-            "проверку адреса."
-        )
-
-        return None
-
-    coordinates = (
-        best_feature
-        .get("geometry", {})
-        .get("coordinates")
-    )
-
-    if not coordinates:
-        return None
-
-    lon = float(
-        coordinates[0]
-    )
-
-    lat = float(
-        coordinates[1]
-    )
-
-    print()
-    print(
-        "GEOAPIFY: точный адрес "
-        "подтверждён:"
-    )
-
-    print(
-        " ",
-        (lon, lat)
-    )
-
-    return lon, lat
-
-
-# ============================================================
-# ORS — ЦЕНТР НАСЕЛЁННОГО ПУНКТА
-# ============================================================
-
-async def geocode_locality_ors(
-    locality: str
-) -> Optional[Tuple[float, float]]:
-
-    if not ORS_API_KEY:
-
-        print(
-            "ORS_API_KEY не найден."
-        )
-
-        return None
-
-    locality = normalize_locality_name(
-        locality
-    )
-
-    query = (
-        f"{locality}, "
-        f"Пензенская область, Россия"
-    )
-
-    print()
-    print(
-        "ORS: поиск центра "
-        "населённого пункта"
-    )
-
-    print(
-        "  запрос:",
-        query
-    )
-
-    params = {
-        "api_key": ORS_API_KEY,
-        "text": query,
-        "size": 10,
-        "boundary.country": "RUS",
-    }
-
-    try:
-
-        async with aiohttp.ClientSession() as session:
-
-            async with session.get(
-                ORS_GEOCODE_URL,
-                params=params,
-                timeout=20
-            ) as response:
-
-                print(
-                    "  HTTP:",
-                    response.status
-                )
-
-                if response.status != 200:
-
-                    text = await response.text()
-
-                    print(
-                        "  ❌ ORS HTTP error:",
-                        text[:500]
-                    )
-
-                    return None
-
-                data = await response.json()
-
-    except Exception as error:
-
-        print(
-            "  ❌ Ошибка ORS:",
-            repr(error)
-        )
-
-        return None
-
-    features = data.get(
-        "features"
-    ) or []
-
-    for feature in features:
-
-        properties = feature.get(
-            "properties"
-        ) or {}
-
-        geometry = feature.get(
-            "geometry"
-        ) or {}
-
-        coordinates = geometry.get(
-            "coordinates"
-        )
-
-        if (
-            not coordinates
-            or
-            len(coordinates) < 2
-        ):
-            continue
-
-        lon = float(
-            coordinates[0]
-        )
-
-        lat = float(
-            coordinates[1]
-        )
-
-        if not is_inside_penza_region(
-            lon,
-            lat
-        ):
-            continue
-
-        label = normalize_text(
-            properties.get("label")
-            or properties.get("name")
-            or ""
-        )
-
-        if (
-            locality not in label
-            and
-            locality not in normalize_locality_name(
-                properties.get("name")
+            print(
+                "  ❌ Населённый пункт "
+                "НЕ совпадает."
             )
-        ):
-            continue
+
+            return False
 
         print(
-            "ORS: центр найден:",
-            (lon, lat)
+            "  ✅ Населённый пункт совпадает."
         )
 
-        return lon, lat
+    # ========================================================
+    # РЕГИОН
+    # ========================================================
 
+    if requested_region:
+
+        if not region_matches(
+            requested_region,
+            properties
+        ):
+
+            print(
+                "  ❌ Регион НЕ совпадает."
+            )
+
+            return False
+
+        print(
+            "  ✅ Регион совпадает."
+        )
+
+    # ========================================================
+    # BUILDING
+    # ========================================================
+
+    if result_type == "building":
+
+        print(
+            "  ✅ RESULT_TYPE = BUILDING."
+        )
+
+        return True
+
+    # ========================================================
+    # ДОМ
+    # ========================================================
+
+    if requested_house:
+
+        if (
+            found_house
+            and requested_street
+            and found_street
+        ):
+
+            print(
+                "  ✅ Адрес подтверждён "
+                "по улице + номеру дома."
+            )
+
+            return True
+
+        print(
+            "  ❌ Недостаточно данных "
+            "для подтверждения дома."
+        )
+
+        return False
+
+    # ========================================================
+    # УЛИЦА БЕЗ ДОМА
+    # ========================================================
+
+    if requested_street:
+
+        print(
+            "  ✅ Адрес без номера дома "
+            "подтверждён по улице."
+        )
+
+        return True
+
+    # ========================================================
+    # ТОЛЬКО НАСЕЛЁННЫЙ ПУНКТ
+    # ========================================================
+
+    if requested_locality:
+
+        print(
+            "  ✅ Населённый пункт "
+            "подтверждён."
+        )
+
+        return True
+
+    return False
+
+
+# ============================================================
+# ПОИСК ЦЕНТРА НАСЕЛЁННОГО ПУНКТА
+# ============================================================
+
+async def geocode_locality_center(
+    locality,
+    region=None
+):
+    if not locality:
+        return None
+
+    locality = normalize_text(
+        locality
+    )
+
+    queries = []
+
+    if region:
+
+        queries.append(
+            f"{locality}, {region}, Россия"
+        )
+
+    queries.append(
+        f"{locality}, Россия"
+    )
+
+    bias_coordinates = {
+        "пенза": (53.1959, 45.0183),
+        "саратов": (51.5336, 46.0343),
+        "заречный": (53.2000, 45.1667),
+        "воробьевка": (53.1000, 44.9000),
+    }
+
+    bias_lat = None
+    bias_lon = None
+
+    if locality in bias_coordinates:
+
+        bias_lat, bias_lon = (
+            bias_coordinates[locality]
+        )
+
+    for query in queries:
+
+        print()
+        print(
+            "GEOAPIFY FALLBACK:"
+        )
+
+        print(
+            "  Населённый пункт:",
+            locality
+        )
+
+        print(
+            "  Запрос:",
+            query
+        )
+
+        features = await geoapify_request(
+            query,
+            bias_lat=bias_lat,
+            bias_lon=bias_lon
+        )
+
+        for index, feature in enumerate(
+            features,
+            start=1
+        ):
+
+            properties = (
+                feature.get("properties")
+                or {}
+            )
+
+            geometry = (
+                feature.get("geometry")
+                or {}
+            )
+
+            coordinates = geometry.get(
+                "coordinates"
+            )
+
+            print()
+            print(
+                f"FALLBACK КАНДИДАТ: {index}"
+            )
+
+            print(
+                "  Адрес:",
+                properties.get(
+                    "formatted"
+                )
+            )
+
+            print(
+                "  Тип:",
+                properties.get(
+                    "result_type"
+                )
+            )
+
+            print(
+                "  Город:",
+                properties.get("city")
+            )
+
+            print(
+                "  Регион:",
+                properties.get("state")
+                or properties.get("region")
+            )
+
+            if not locality_matches(
+                locality,
+                properties
+            ):
+
+                print(
+                    "  ❌ Населённый пункт "
+                    "не совпадает."
+                )
+
+                continue
+
+            if not coordinates:
+
+                print(
+                    "  ❌ Нет координат."
+                )
+
+                continue
+
+            if len(coordinates) < 2:
+
+                print(
+                    "  ❌ Некорректные координаты."
+                )
+
+                continue
+
+            lon = coordinates[0]
+            lat = coordinates[1]
+
+            print(
+                "  ✅ Центр населённого пункта "
+                "подтверждён."
+            )
+
+            print(
+                "  Координаты:",
+                lat,
+                lon
+            )
+
+            return {
+                "lat": lat,
+                "lon": lon,
+                "formatted": properties.get(
+                    "formatted"
+                ),
+                "properties": properties,
+            }
+
+    print()
     print(
-        "ORS: подходящий населённый "
-        "пункт не найден."
+        "❌ Центр населённого пункта "
+        "не найден."
     )
 
     return None
 
 
 # ============================================================
-# GEOAPIFY — ЦЕНТР НАСЕЛЁННОГО ПУНКТА
+# ТОЧНОЕ ГЕОКОДИРОВАНИЕ
 # ============================================================
 
-async def geocode_locality_geoapify(
-    locality: str
-) -> Optional[Tuple[float, float]]:
-
-    if not GEOAPIFY_API_KEY:
-
-        print(
-            "GEOAPIFY_API_KEY не найден."
-        )
-
-        return None
-
-    locality = normalize_locality_name(
-        locality
-    )
-
-    # --------------------------------------------------------
-    # Для известных проблемных населённых пунктов
-    # проверенный центр должен иметь приоритет.
-    # --------------------------------------------------------
-
-    if locality in VERIFIED_LOCALITY_COORDS:
-
-        coordinates = (
-            VERIFIED_LOCALITY_COORDS[
-                locality
-            ]
-        )
-
-        print()
-        print(
-            "GEOAPIFY: используется "
-            "проверенный центр:"
-        )
-
-        print(
-            " ",
-            coordinates
-        )
-
-        return coordinates
-
-    query = (
-        f"{locality}, "
-        f"Пензенская область, Россия"
-    )
-
-    print()
-    print(
-        "GEOAPIFY: поиск центра "
-        "населённого пункта"
-    )
-
-    print(
-        "  запрос:",
-        query
-    )
-
-    params = {
-        "text": query,
-        "apiKey": GEOAPIFY_API_KEY,
-        "limit": 10,
-        "filter": (
-            f"rect:"
-            f"{PENZA_MIN_LON},"
-            f"{PENZA_MIN_LAT},"
-            f"{PENZA_MAX_LON},"
-            f"{PENZA_MAX_LAT}"
-        ),
-    }
-
-    try:
-
-        async with aiohttp.ClientSession() as session:
-
-            async with session.get(
-                GEOAPIFY_URL,
-                params=params,
-                timeout=20
-            ) as response:
-
-                print(
-                    "  HTTP:",
-                    response.status
-                )
-
-                if response.status != 200:
-
-                    text = await response.text()
-
-                    print(
-                        "  ❌ GEOAPIFY HTTP error:",
-                        text[:500]
-                    )
-
-                    return None
-
-                data = await response.json()
-
-    except Exception as error:
-
-        print(
-            "  ❌ Ошибка GEOAPIFY:",
-            repr(error)
-        )
-
-        return None
-
-    features = data.get(
-        "features"
-    ) or []
-
-    best_feature = None
-    best_score = -100000
-
-    for index, feature in enumerate(
-        features,
-        start=1
-    ):
-
-        properties = get_feature_layer(
-            feature
-        )
-
-        geometry = feature.get(
-            "geometry"
-        ) or {}
-
-        coordinates = geometry.get(
-            "coordinates"
-        )
-
-        if (
-            not coordinates
-            or
-            len(coordinates) < 2
-        ):
-            continue
-
-        lon = float(
-            coordinates[0]
-        )
-
-        lat = float(
-            coordinates[1]
-        )
-
-        if not is_inside_penza_region(
-            lon,
-            lat
-        ):
-            continue
-
-        score = score_feature(
-            feature,
-            locality
-        )
-
-        print()
-        print(
-            f"  КАНДИДАТ GEOAPIFY #{index}"
-        )
-
-        print(
-            "    name:",
-            properties.get("name")
-        )
-
-        print(
-            "    formatted:",
-            properties.get("formatted")
-        )
-
-        print(
-            "    city:",
-            properties.get("city")
-        )
-
-        print(
-            "    town:",
-            properties.get("town")
-        )
-
-        print(
-            "    village:",
-            properties.get("village")
-        )
-
-        print(
-            "    locality:",
-            properties.get("locality")
-        )
-
-        print(
-            "    municipality:",
-            properties.get("municipality")
-        )
-
-        print(
-            "    SCORE:",
-            score
-        )
-
-        if score > best_score:
-
-            best_score = score
-            best_feature = feature
-
-    if not best_feature:
-
-        print(
-            "GEOAPIFY: подходящий центр "
-            "не найден."
-        )
-
-        return None
-
-    coordinates = (
-        best_feature
-        .get("geometry", {})
-        .get("coordinates")
-    )
-
-    if not coordinates:
-        return None
-
-    lon = float(
-        coordinates[0]
-    )
-
-    lat = float(
-        coordinates[1]
-    )
-
-    print()
-    print(
-        "GEOAPIFY: центр найден:",
-        (lon, lat)
-    )
-
-    print(
-        "  SCORE:",
-        best_score
-    )
-
-    return lon, lat
-
-
-# ============================================================
-# FALLBACK
-# ============================================================
-
-async def fallback_to_locality(
-    locality: str
-) -> Optional[Tuple[float, float]]:
-
-    locality = normalize_locality_name(
-        locality
-    )
-
-    # --------------------------------------------------------
-    # ПРОВЕРЕННЫЕ КООРДИНАТЫ
-    # --------------------------------------------------------
-
-    if locality in VERIFIED_LOCALITY_COORDS:
-
-        coordinates = (
-            VERIFIED_LOCALITY_COORDS[
-                locality
-            ]
-        )
-
-        print()
-        print(
-            "ИСПОЛЬЗУЕМ ПРОВЕРЕННЫЙ "
-            "ЦЕНТР:"
-        )
-
-        print(
-            "  населённый пункт:",
-            locality
-        )
-
-        print(
-            "  координаты:",
-            coordinates
-        )
-
-        return coordinates
-
-    # --------------------------------------------------------
-    # ORS
-    # --------------------------------------------------------
-
-    coordinates = await geocode_locality_ors(
-        locality
-    )
-
-    if coordinates:
-        return coordinates
-
-    # --------------------------------------------------------
-    # GEOAPIFY
-    # --------------------------------------------------------
-
-    coordinates = await geocode_locality_geoapify(
-        locality
-    )
-
-    if coordinates:
-        return coordinates
-
-    return None
-
-
-# ============================================================
-# ОСНОВНОЕ ГЕОКОДИРОВАНИЕ
-# ============================================================
-
-async def geocode(
-    address: str
-) -> Optional[Tuple[float, float]]:
+async def geocode_exact_address(address):
 
     print()
     print("=" * 60)
@@ -1504,501 +1108,735 @@ async def geocode(
     )
     print("=" * 60)
 
-    locality = extract_requested_locality(
+    if not address:
+
+        print(
+            "❌ Пустой адрес."
+        )
+
+        return None
+
+    requested_locality = (
+        extract_locality_from_address(
+            address
+        )
+    )
+
+    requested_region = detect_region(
+        address
+    )
+
+    requested_house = extract_house_number(
+        address
+    )
+
+    requested_street = extract_street_name(
         address
     )
 
     print(
-        "НАСЕЛЁННЫЙ ПУНКТ:",
-        locality
+        "Населённый пункт:",
+        requested_locality
     )
 
-    if not locality:
+    print(
+        "Регион:",
+        requested_region
+    )
 
-        print(
-            "❌ Не удалось определить "
-            "населённый пункт."
-        )
+    print(
+        "Улица:",
+        requested_street
+    )
 
-        return None
-
-    locality = normalize_locality_name(
-        locality
+    print(
+        "Номер дома:",
+        requested_house
     )
 
     # ========================================================
-    # НОМЕР ДОМА ЕСТЬ
+    # ЗАЩИТА НОМЕРА ДОМА
     # ========================================================
 
-    if has_house_number(address):
+    if requested_house:
+
+        print(
+            "Ищем ТОЛЬКО точный адрес."
+        )
+
+        if not is_house_number_allowed(
+            requested_house
+        ):
+
+            print()
+            print(
+                "❌ НОМЕР ДОМА СЛИШКОМ БОЛЬШОЙ:"
+            )
+
+            print(
+                requested_house
+            )
+
+            print(
+                "❌ Максимально разрешённый:",
+                MAX_ALLOWED_HOUSE_NUMBER
+            )
+
+            print(
+                "❌ Геокодирование прекращено."
+            )
+
+            return None
+
+    else:
+
+        print(
+            "ℹ️ Номер дома не указан."
+        )
+
+    # ========================================================
+    # BIAS
+    # ========================================================
+
+    bias_coordinates = {
+        "пенза": (53.1959, 45.0183),
+        "саратов": (51.5336, 46.0343),
+        "заречный": (53.2000, 45.1667),
+        "воробьевка": (53.1000, 44.9000),
+    }
+
+    bias_lat = None
+    bias_lon = None
+
+    if requested_locality:
+
+        coords = bias_coordinates.get(
+            requested_locality
+        )
+
+        if coords:
+            bias_lat, bias_lon = coords
+
+    # ========================================================
+    # ЗАПРОСЫ
+    # ========================================================
+
+    queries = []
+
+    queries.append(
+        str(address).strip()
+    )
+
+    # --------------------------------------------------------
+    # Улица без дома.
+    # --------------------------------------------------------
+
+    if (
+        requested_street
+        and not requested_house
+        and requested_locality
+    ):
+
+        street_query = (
+            f"{requested_locality}, "
+            f"{requested_street}"
+        )
+
+        queries.append(
+            street_query
+        )
+
+    # --------------------------------------------------------
+    # Улица + дом.
+    # --------------------------------------------------------
+
+    if (
+        requested_street
+        and requested_house
+    ):
+
+        second_query = (
+            f"{requested_locality or ''}, "
+            f"{requested_street}, "
+            f"{requested_house}, "
+            f"{requested_region or ''}, "
+            f"Россия"
+        )
+
+        second_query = re.sub(
+            r"\s+",
+            " ",
+            second_query
+        ).strip(" ,")
+
+        if (
+            second_query.lower()
+            != str(address).strip().lower()
+        ):
+
+            queries.append(
+                second_query
+            )
+
+    # --------------------------------------------------------
+    # Убираем дубли.
+    # --------------------------------------------------------
+
+    unique_queries = []
+
+    for query in queries:
+
+        if not query:
+            continue
+
+        if query.lower() in [
+            item.lower()
+            for item in unique_queries
+        ]:
+
+            continue
+
+        unique_queries.append(
+            query
+        )
+
+    # ========================================================
+    # GEOAPIFY
+    # ========================================================
+
+    for index, query in enumerate(
+        unique_queries,
+        start=1
+    ):
 
         print()
         print(
-            "ЕСТЬ НОМЕР ДОМА."
+            f"GEOAPIFY ПОИСК № {index}"
         )
 
-        # ----------------------------------------------------
-        # Сначала ищем конкретный адрес.
-        # ----------------------------------------------------
-
-        coordinates = await geocode_address_geoapify(
-            address,
-            locality
-        )
-
-        if coordinates:
-
-            return coordinates
-
-        print()
         print(
-            "❌ Точный адрес не подтверждён."
+            "  text:",
+            query
         )
 
-        # ----------------------------------------------------
-        # Для небольшого населённого пункта
-        # можно перейти на центр.
-        # ----------------------------------------------------
-
-        if can_use_locality_fallback(
-            locality
+        if (
+            bias_lat is not None
+            and bias_lon is not None
         ):
 
             print(
-                "Разрешён fallback "
-                "на центр населённого пункта."
+                "  bias:",
+                bias_lat,
+                bias_lon
             )
 
-            return await fallback_to_locality(
-                locality
-            )
-
-        # ----------------------------------------------------
-        # Для Пензы, Заречного и других крупных
-        # населённых пунктов НЕ подменяем дом центром.
-        # ----------------------------------------------------
-
-        print(
-            "❌ Для крупного населённого "
-            "пункта центр вместо указанного "
-            "дома НЕ используется."
+        features = await geoapify_request(
+            query,
+            bias_lat=bias_lat,
+            bias_lon=bias_lon
         )
 
-        return None
-
-    # ========================================================
-    # НОМЕРА ДОМА НЕТ
-    # ========================================================
-
-    print()
-    print(
-        "ТОЧНОГО НОМЕРА ДОМА НЕТ."
-    )
-
-    print(
-        "Ищем населённый пункт."
-    )
-
-    return await fallback_to_locality(
-        locality
-    )
-
-
-# ============================================================
-# ИЗВЛЕЧЕНИЕ РАССТОЯНИЯ ИЗ ORS
-# ============================================================
-
-def extract_ors_distance(
-    data: Dict[str, Any]
-) -> Optional[float]:
-
-    # ========================================================
-    # ВАРИАНТ 1:
-    #
-    # FeatureCollection
-    #
-    # features[0]
-    #   properties
-    #     summary
-    #       distance
-    #
-    # ========================================================
-
-    features = data.get(
-        "features"
-    )
-
-    if features:
-
-        try:
-
-            feature = features[0]
+        for candidate_index, feature in enumerate(
+            features,
+            start=1
+        ):
 
             properties = (
                 feature.get("properties")
                 or {}
             )
 
-            summary = (
-                properties.get("summary")
+            geometry = (
+                feature.get("geometry")
                 or {}
             )
 
-            distance = summary.get(
-                "distance"
+            coordinates = geometry.get(
+                "coordinates"
             )
 
-            if distance is not None:
-
-                print(
-                    "ORS FORMAT: FeatureCollection"
-                )
-
-                return float(
-                    distance
-                )
-
-        except Exception as error:
+            print()
+            print(
+                f"GEOAPIFY КАНДИДАТ: "
+                f"{candidate_index}"
+            )
 
             print(
-                "Ошибка разбора "
-                "ORS features:",
-                repr(error)
-            )
-
-    # ========================================================
-    # ВАРИАНТ 2:
-    #
-    # routes[0]
-    #   summary
-    #     distance
-    #
-    # ========================================================
-
-    routes = data.get(
-        "routes"
-    )
-
-    if routes:
-
-        try:
-
-            route = routes[0]
-
-            summary = (
-                route.get("summary")
-                or {}
-            )
-
-            distance = summary.get(
-                "distance"
-            )
-
-            if distance is not None:
-
-                print(
-                    "ORS FORMAT: routes"
+                "  Адрес:",
+                properties.get(
+                    "formatted"
                 )
-
-                return float(
-                    distance
-                )
-
-        except Exception as error:
+            )
 
             print(
-                "Ошибка разбора "
-                "ORS routes:",
-                repr(error)
+                "  Тип:",
+                properties.get(
+                    "result_type"
+                )
             )
 
-    return None
-
-
-# ============================================================
-# ПОЛУЧЕНИЕ ДЛИТЕЛЬНОСТИ ORS
-# ============================================================
-
-def extract_ors_duration(
-    data: Dict[str, Any]
-) -> Optional[float]:
-
-    features = data.get(
-        "features"
-    )
-
-    if features:
-
-        try:
-
-            duration = (
-                features[0]
-                .get("properties", {})
-                .get("summary", {})
-                .get("duration")
+            print(
+                "  Город:",
+                properties.get("city")
             )
 
-            if duration is not None:
-                return float(duration)
-
-        except Exception:
-            pass
-
-    routes = data.get(
-        "routes"
-    )
-
-    if routes:
-
-        try:
-
-            duration = (
-                routes[0]
-                .get("summary", {})
-                .get("duration")
+            print(
+                "  Населённый пункт:",
+                properties.get("locality")
+                or properties.get("town")
+                or properties.get("village")
             )
 
-            if duration is not None:
-                return float(duration)
+            print(
+                "  Улица:",
+                properties.get("street")
+            )
 
-        except Exception:
-            pass
+            print(
+                "  Дом:",
+                properties.get("housenumber")
+            )
 
-    return None
+            print(
+                "  confidence:",
+                properties.get("confidence")
+            )
 
+            print(
+                "  building confidence:",
+                properties.get(
+                    "building_confidence"
+                )
+            )
 
-# ============================================================
-# ПОСТРОЕНИЕ МАРШРУТА
-# ============================================================
+            print(
+                "  Регион результата:",
+                properties.get("state")
+                or properties.get("region")
+            )
 
-async def get_route_distance(
-    from_address: str,
-    to_address: str
-) -> Optional[float]:
+            print(
+                "  result_type:",
+                properties.get(
+                    "result_type"
+                )
+            )
 
-    print()
-    print("=" * 60)
-    print(
-        "ПОСТРОЕНИЕ МАРШРУТА"
-    )
+            print(
+                "  match_type:",
+                properties.get(
+                    "match_type"
+                )
+            )
 
-    print(
-        "ОТКУДА:",
-        from_address
-    )
+            matched = exact_address_match(
+                properties=properties,
+                requested_locality=requested_locality,
+                requested_region=requested_region,
+                requested_street=requested_street,
+                requested_house=requested_house
+            )
 
-    print(
-        "КУДА:",
-        to_address
-    )
+            if not matched:
+                continue
 
-    print("=" * 60)
+            if (
+                not coordinates
+                or len(coordinates) < 2
+            ):
+
+                print(
+                    "  ❌ Нет координат."
+                )
+
+                continue
+
+            lon = coordinates[0]
+            lat = coordinates[1]
+
+            print()
+            print(
+                "  ✅ АДРЕС ПОДТВЕРЖДЁН."
+            )
+
+            print(
+                "  Координаты:",
+                lat,
+                lon
+            )
+
+            return {
+                "lat": lat,
+                "lon": lon,
+                "formatted": properties.get(
+                    "formatted"
+                ),
+                "properties": properties,
+            }
 
     # ========================================================
-    # ОТКУДА
+    # ДОМ — FALLBACK ЗАПРЕЩЁН
     # ========================================================
 
-    from_coordinates = await geocode(
-        from_address
-    )
+    if requested_house:
 
-    if not from_coordinates:
+        print()
+        print(
+            "❌ GEOAPIFY не подтвердил "
+            "точный адрес."
+        )
 
         print(
-            "❌ Не удалось определить "
-            "координаты ОТКУДА."
+            "❌ ТОЧНЫЙ АДРЕС НЕ НАЙДЕН."
+        )
+
+        print(
+            "❌ Fallback на центр "
+            "населённого пункта ЗАПРЕЩЁН."
         )
 
         return None
 
-    print()
-    print(
-        "КООРДИНАТЫ ОТКУДА:",
-        from_coordinates
-    )
-
     # ========================================================
-    # КУДА
+    # УЛИЦА БЕЗ ДОМА — FALLBACK ЗАПРЕЩЁН
     # ========================================================
 
-    to_coordinates = await geocode(
-        to_address
-    )
+    if requested_street:
 
-    if not to_coordinates:
-
+        print()
         print(
-            "❌ Не удалось определить "
-            "координаты КУДА."
-        )
-
-        return None
-
-    print()
-    print(
-        "КООРДИНАТЫ КУДА:",
-        to_coordinates
-    )
-
-    # ========================================================
-    # ORS API KEY
-    # ========================================================
-
-    if not ORS_API_KEY:
-
-        print(
-            "❌ OPENROUTESERVICE_API_KEY "
+            "❌ Улица указана, "
+            "но подходящий результат "
             "не найден."
         )
 
+        print(
+            "❌ Центр населённого пункта "
+            "для адреса с улицей использовать "
+            "не будем."
+        )
+
         return None
 
     # ========================================================
-    # КООРДИНАТЫ ORS
+    # ТОЛЬКО ГОРОД — FALLBACK РАЗРЕШЁН
     # ========================================================
 
-    coordinates = [
-        [
-            from_coordinates[0],
-            from_coordinates[1]
-        ],
-        [
-            to_coordinates[0],
-            to_coordinates[1]
-        ]
-    ]
+    if requested_locality:
+
+        print()
+        print(
+            "⚠️ Номер дома не указан."
+        )
+
+        print(
+            "⚠️ Улица также не указана."
+        )
+
+        print(
+            "➡️ Разрешён fallback "
+            "на центр населённого пункта."
+        )
+
+        return await geocode_locality_center(
+            requested_locality,
+            requested_region
+        )
 
     print()
     print(
-        "ОТПРАВКА ЗАПРОСА В ORS..."
+        "❌ Не удалось определить "
+        "населённый пункт."
     )
 
-    payload = {
-        "coordinates": coordinates,
-        "instructions": True,
-        "units": "km",
-    }
+    return None
+
+
+# ============================================================
+# OPENROUTESERVICE
+# ============================================================
+
+async def build_route(
+    from_lat,
+    from_lon,
+    to_lat,
+    to_lon
+):
+    if not ORS_API_KEY:
+
+        print(
+            "❌ ORS_API_KEY отсутствует."
+        )
+
+        return None
+
+    url = (
+        "https://api.openrouteservice.org/"
+        "v2/directions/driving-car"
+    )
 
     headers = {
         "Authorization": ORS_API_KEY,
         "Content-Type": "application/json",
     }
 
-    # ========================================================
-    # ЗАПРОС
-    # ========================================================
+    body = {
+        "coordinates": [
+            [
+                from_lon,
+                from_lat
+            ],
+            [
+                to_lon,
+                to_lat
+            ]
+        ],
+        "units": "km",
+    }
+
+    print()
+    print(
+        "OPENROUTESERVICE:"
+    )
+
+    print(
+        "  FROM:",
+        from_lat,
+        from_lon
+    )
+
+    print(
+        "  TO:",
+        to_lat,
+        to_lon
+    )
 
     try:
 
         async with aiohttp.ClientSession() as session:
 
             async with session.post(
-                ORS_ROUTE_URL,
-                json=payload,
+                url,
                 headers=headers,
-                timeout=30
+                json=body,
+                timeout=aiohttp.ClientTimeout(
+                    total=30
+                )
             ) as response:
 
                 print(
-                    "ORS ROUTE HTTP:",
+                    "ORS HTTP:",
                     response.status
                 )
 
                 if response.status != 200:
 
-                    text = await response.text()
+                    body_text = await response.text()
 
                     print(
-                        "❌ ORS ROUTE ERROR:"
+                        "❌ ORS RESPONSE:"
                     )
 
                     print(
-                        text[:1000]
+                        body_text[:2000]
                     )
 
                     return None
 
                 data = await response.json()
 
+                routes = data.get(
+                    "routes"
+                )
+
+                if not routes:
+
+                    print(
+                        "❌ ORS не вернул маршруты."
+                    )
+
+                    return None
+
+                summary = (
+                    routes[0].get(
+                        "summary"
+                    )
+                    or {}
+                )
+
+                distance = summary.get(
+                    "distance"
+                )
+
+                duration = summary.get(
+                    "duration"
+                )
+
+                if distance is None:
+
+                    print(
+                        "❌ ORS не вернул "
+                        "расстояние."
+                    )
+
+                    return None
+
+                distance_km = round(
+                    float(distance),
+                    1
+                )
+
+                duration_minutes = None
+
+                if duration is not None:
+
+                    duration_minutes = round(
+                        float(duration) / 60
+                    )
+
+                print(
+                    "✅ ORS расстояние:",
+                    distance_km,
+                    "км"
+                )
+
+                if duration_minutes is not None:
+
+                    print(
+                        "✅ Время:",
+                        duration_minutes,
+                        "мин."
+                    )
+
+                return {
+                    "distance_km": distance_km,
+                    "duration_minutes": duration_minutes,
+                }
+
     except Exception as error:
 
         print(
-            "❌ Ошибка запроса маршрута ORS:",
+            "❌ Ошибка ORS:",
             repr(error)
         )
 
         return None
 
+
+# ============================================================
+# ОСНОВНАЯ ФУНКЦИЯ
+# ============================================================
+
+async def get_route_distance(
+    from_address,
+    to_address
+):
+    print()
+    print("=" * 60)
+    print(
+        "ПОСТРОЕНИЕ МАРШРУТА"
+    )
+    print(
+        "ОТКУДА:",
+        from_address
+    )
+    print(
+        "КУДА:",
+        to_address
+    )
+    print("=" * 60)
+
     # ========================================================
-    # РАССТОЯНИЕ
+    # ОТКУДА
     # ========================================================
 
-    distance = extract_ors_distance(
-        data
+    from_point = await geocode_exact_address(
+        from_address
     )
 
-    if distance is None:
+    if not from_point:
 
+        print()
         print(
-            "❌ ORS не вернул "
-            "расстояние."
+            "❌ Не удалось определить "
+            "координаты точки ОТКУДА."
         )
 
         print(
-            "Ключи ответа:",
-            list(data.keys())
+            "❌ МАРШРУТ НЕ БУДЕТ ПОСТРОЕН."
         )
 
         return None
 
     # ========================================================
-    # ORS МОЖЕТ ВЕРНУТЬ КМ
-    #
-    # В нашем текущем ответе:
-    #
-    # distance = 52.6
-    #
-    # units = km
-    #
-    # Поэтому здесь НЕ делим на 1000.
+    # КУДА
     # ========================================================
 
-    distance_km = round(
-        float(distance),
-        1
+    to_point = await geocode_exact_address(
+        to_address
     )
 
+    if not to_point:
+
+        print()
+        print(
+            "❌ Не удалось определить "
+            "координаты точки КУДА."
+        )
+
+        print(
+            "❌ МАРШРУТ НЕ БУДЕТ ПОСТРОЕН."
+        )
+
+        return None
+
     # ========================================================
-    # ДЛИТЕЛЬНОСТЬ
+    # МАРШРУТ
     # ========================================================
 
-    duration = extract_ors_duration(
-        data
+    route = await build_route(
+        from_lat=from_point["lat"],
+        from_lon=from_point["lon"],
+        to_lat=to_point["lat"],
+        to_lon=to_point["lon"]
     )
+
+    if not route:
+
+        print()
+        print(
+            "❌ Не удалось построить маршрут."
+        )
+
+        return None
+
+    distance_km = route[
+        "distance_km"
+    ]
 
     print()
+    print("=" * 60)
     print(
         "✅ МАРШРУТ ПОСТРОЕН"
     )
 
     print(
-        "РАССТОЯНИЕ:",
+        "Расстояние:",
         distance_km,
         "км"
     )
 
-    if duration is not None:
-
-        duration_minutes = round(
-            duration / 60
-        )
+    if route.get(
+        "duration_minutes"
+    ) is not None:
 
         print(
-            "ВРЕМЯ В ПУТИ:",
-            duration_minutes,
+            "Время:",
+            route["duration_minutes"],
             "мин."
         )
 
-    print()
+    print("=" * 60)
 
     return distance_km
+
