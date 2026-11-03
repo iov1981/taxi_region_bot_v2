@@ -1,0 +1,199 @@
+import zipfile, os, re, shutil, textwrap, pathlib
+src="/mnt/data/taxi_region_bot_v2-main (1).zip"
+work="/mnt/data/taxi_region_bot_v2-main-fixed"
+if os.path.exists(work): shutil.rmtree(work)
+with zipfile.ZipFile(src) as z: z.extractall("/mnt/data")
+work="/mnt/data/taxi_region_bot_v2-main"
+path=os.path.join(work,"app/services/ai_parser.py")
+with open(path,encoding="utf-8") as f: content=f.read()
+start=content.index("async def parse_request(text: str):")
+new_func = r'''
+def _extract_labeled_fields(text: str):
+    """
+    Разбирает структурированную заявку вида:
+    Откуда: Пенза, улица Ленина, 25.
+    Куда: Пенза, улица Московская, 10.
+    Пассажиров: 2.
+    Время: как можно скорее.
+
+    Значения полей отделяются по следующим меткам, а не по точкам:
+    точки внутри адреса и номера дома сохраняются.
+    """
+    labels = {
+        "from": r"откуда",
+        "to": r"куда",
+        "passengers": r"пассажиров|пассажиры|пассажира|количество\s+пассажиров",
+        "date": r"дата",
+        "time": r"время",
+    }
+    label_pattern = (
+        r"(?i)(?:^|[\n;])\s*("
+        + "|".join(labels.values())
+        + r")\s*:\s*"
+    )
+    matches = list(re.finditer(label_pattern, text))
+    fields = {}
+    for i, match in enumerate(matches):
+        label = match.group(1).lower()
+        value_start = match.end()
+        value_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        value = text[value_start:value_end].strip(" \t\r\n;")
+        # Убираем только завершающую пунктуацию, не внутренние запятые.
+        value = re.sub(r"[.!?]+\s*$", "", value).strip()
+        if re.fullmatch(r"откуда", label):
+            key = "from"
+        elif re.fullmatch(r"куда", label):
+            key = "to"
+        elif re.fullmatch(r"дата", label):
+            key = "date"
+        elif re.fullmatch(r"время", label):
+            key = "time"
+        else:
+            key = "passengers"
+        fields[key] = value
+    return fields
+
+
+def _place_from_address(address: str):
+    places = find_places(address)
+    return places[0] if places else None
+
+
+def _parse_labeled_request(text: str):
+    fields = _extract_labeled_fields(text)
+    if not fields.get("from") or not fields.get("to"):
+        return None
+
+    from_address = clean_address_part(fields["from"])
+    to_address = clean_address_part(fields["to"])
+    from_place = _place_from_address(from_address)
+    to_place = _place_from_address(to_address)
+
+    # Если населённый пункт не распознан, не подменяем его другим.
+    if not from_place or not to_place:
+        return None
+
+    passengers_value = fields.get("passengers", "")
+    passenger_match = re.search(r"\d+", passengers_value)
+    passengers = passenger_match.group(0) if passenger_match else "не указано"
+
+    date_value = fields.get("date", "")
+    date = date_value or "не указана"
+
+    time_value = fields.get("time", "")
+    time = time_value or "не указано"
+
+    if time_value:
+        time_lower = time_value.lower()
+        if any(phrase in time_lower for phrase in (
+            "как можно скорее", "сейчас", "срочно", "побыстрее", "немедленно"
+        )):
+            time = "как можно скорее"
+        else:
+            # Если есть стандартная дата/время — используем существующий парсер.
+            parsed_time = find_time(time_value)
+            if parsed_time != "не указано":
+                time = parsed_time
+            elif time_lower in ("не указано", "не указано.", "не знаю"):
+                time = "не указано"
+
+    if date_value:
+        parsed_date = find_date(date_value)
+        if parsed_date != "не указана":
+            date = parsed_date
+
+    return {
+        "from_place": from_place,
+        "to_place": to_place,
+        "from_address": from_address,
+        "to_address": to_address,
+        "date": date,
+        "time": time,
+        "passengers": passengers,
+        "status": "локальный анализ",
+    }
+
+
+async def parse_request(text: str):
+    text = normalize_text(text)
+
+    if not text:
+        return {
+            "from_place": None,
+            "to_place": None,
+            "from_address": None,
+            "to_address": None,
+            "date": "не указана",
+            "time": "не указано",
+            "passengers": "не указано",
+        }
+
+    # Сначала пробуем структурированный формат Mini App/клиентского сообщения.
+    labeled_result = _parse_labeled_request(text)
+    if labeled_result:
+        result = labeled_result
+    else:
+        date = find_date(text)
+        time = find_time(text)
+        if re.search(r"\bкак можно скорее\b|\bсрочно\b|\bнемедленно\b", text, re.I):
+            time = "как можно скорее"
+        passengers = find_passengers(text)
+
+        from_place, to_place = find_direction(text)
+        dash_result = parse_dash_route(text)
+
+        if dash_result:
+            from_place = dash_result["from_place"]
+            to_place = dash_result["to_place"]
+            from_address = dash_result["from_address"]
+            to_address = dash_result["to_address"]
+        else:
+            direction_result = parse_direction_route(text)
+            if direction_result:
+                from_place = direction_result["from_place"]
+                to_place = direction_result["to_place"]
+                from_address = direction_result["from_address"]
+                to_address = direction_result["to_address"]
+            else:
+                places = find_places(text)
+                if not from_place and len(places) >= 1:
+                    from_place = places[0]
+                if not to_place and len(places) >= 2:
+                    to_place = places[1]
+                from_address, to_address = find_addresses(text, from_place, to_place)
+
+        if from_place and not from_address:
+            from_address = from_place
+        if to_place and not to_address:
+            to_address = to_place
+        if from_address:
+            from_address = clean_address_part(from_address)
+        if to_address:
+            to_address = clean_address_part(to_address)
+
+        result = {
+            "from_place": from_place or "не определено",
+            "to_place": to_place or "не определено",
+            "from_address": from_address or "не указан",
+            "to_address": to_address or "не указан",
+            "date": date,
+            "time": time,
+            "passengers": passengers,
+            "status": "локальный анализ",
+        }
+
+    print("----------------------------------------")
+    print("ТЕКСТ КЛИЕНТА:")
+    print(text)
+    print("ОТКУДА:", result.get("from_place") or "не определено")
+    print("КУДА:", result.get("to_place") or "не определено")
+    print("АДРЕС ОТКУДА:", result.get("from_address") or "не указан")
+    print("АДРЕС КУДА:", result.get("to_address") or "не указан")
+    print("ДАТА:", result.get("date", "не указана"))
+    print("ВРЕМЯ:", result.get("time", "не указано"))
+    print("ПАССАЖИРОВ:", result.get("passengers", "не указано"))
+    print("----------------------------------------")
+    return result
+'''
+content=content[:start]+new_func+"\n"
+with open(path,"w",encoding="utf-8") as f: f.write(content)

@@ -1,0 +1,379 @@
+
+const tg = window.Telegram.WebApp;
+
+tg.ready();
+tg.expand();
+
+let passengers = 1;
+let selectedTime = "now";
+let selectedPayment = "cash";
+let selectedComments = [];
+
+const fromInput = document.getElementById("from");
+const toInput = document.getElementById("to");
+
+const passengersElement = document.getElementById("passengers");
+const minusButton = document.getElementById("minus");
+const plusButton = document.getElementById("plus");
+
+const orderButton = document.getElementById("order");
+const dateInput = document.getElementById("date");
+const timeInput = document.getElementById("time");
+
+const commentInput = document.getElementById("comment");
+const priceElement = document.getElementById("price");
+const priceStatus = document.getElementById("price-status");
+const mapStatus = document.getElementById("map-status");
+
+// ============================================================
+// ТЕМА TELEGRAM
+// ============================================================
+
+function applyTelegramTheme() {
+    if (!tg.themeParams) return;
+
+    document.documentElement.style.setProperty(
+        "--tg-button-color",
+        tg.themeParams.button_color || "#229ed9"
+    );
+}
+
+applyTelegramTheme();
+
+// ============================================================
+// ДАТА И ВРЕМЯ
+// ============================================================
+
+function formatDate(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+}
+
+function formatTime(date) {
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+
+    return `${hours}:${minutes}`;
+}
+
+function setNow() {
+    const now = new Date();
+
+    dateInput.value = formatDate(now);
+    timeInput.value = formatTime(now);
+}
+
+function setThirtyMinutes() {
+    const date = new Date();
+
+    date.setMinutes(date.getMinutes() + 30);
+
+    dateInput.value = formatDate(date);
+    timeInput.value = formatTime(date);
+}
+
+function setTomorrow() {
+    const date = new Date();
+
+    date.setDate(date.getDate() + 1);
+
+    dateInput.value = formatDate(date);
+    timeInput.value = "08:00";
+}
+
+// ============================================================
+// БЫСТРЫЙ ВЫБОР ВРЕМЕНИ
+// ============================================================
+
+document.querySelectorAll(".quick-time-button").forEach(button => {
+    button.addEventListener("click", () => {
+        document.querySelectorAll(".quick-time-button").forEach(item => {
+            item.classList.remove("active");
+        });
+
+        button.classList.add("active");
+
+        selectedTime = button.dataset.time;
+
+        if (selectedTime === "now") {
+            setNow();
+        } else if (selectedTime === "30min") {
+            setThirtyMinutes();
+        } else if (selectedTime === "tomorrow") {
+            setTomorrow();
+        }
+    });
+});
+
+// ============================================================
+// КОЛИЧЕСТВО ПАССАЖИРОВ
+// ============================================================
+
+minusButton.addEventListener("click", () => {
+    if (passengers > 1) {
+        passengers--;
+        passengersElement.textContent = passengers;
+        updateOrderButton();
+    }
+});
+
+plusButton.addEventListener("click", () => {
+    if (passengers < 8) {
+        passengers++;
+        passengersElement.textContent = passengers;
+        updateOrderButton();
+    }
+});
+
+// ============================================================
+// ПОМЕНЯТЬ МЕСТАМИ ОТКУДА И КУДА
+// ============================================================
+
+document.getElementById("swap-route").addEventListener("click", () => {
+    const from = fromInput.value;
+    const to = toInput.value;
+
+    fromInput.value = to;
+    toInput.value = from;
+
+    updateMap();
+    updateOrderButton();
+});
+
+// ============================================================
+// ГЕОЛОКАЦИЯ
+// ============================================================
+
+document.getElementById("location-button").addEventListener("click", () => {
+    const status = document.getElementById("location-status");
+
+    status.classList.remove("hidden");
+    status.textContent = "Определяем местоположение…";
+
+    if (!navigator.geolocation) {
+        status.textContent = "Геолокация недоступна на этом устройстве.";
+        return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+        position => {
+            const latitude = position.coords.latitude;
+            const longitude = position.coords.longitude;
+
+            window.userLocation = {
+                latitude,
+                longitude
+            };
+
+            status.textContent = "Местоположение определено.";
+        },
+        error => {
+            let message = "Не удалось определить местоположение.";
+
+            if (error.code === error.PERMISSION_DENIED) {
+                message = "Доступ к геолокации запрещён.";
+            } else if (error.code === error.POSITION_UNAVAILABLE) {
+                message = "Местоположение временно недоступно.";
+            } else if (error.code === error.TIMEOUT) {
+                message = "Истекло время определения местоположения.";
+            }
+
+            status.textContent = message;
+        },
+        {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 60000
+        }
+    );
+});
+
+// ============================================================
+// СПОСОБ ОПЛАТЫ
+// ============================================================
+
+document.querySelectorAll(".payment-option").forEach(button => {
+    button.addEventListener("click", () => {
+        document.querySelectorAll(".payment-option").forEach(item => {
+            item.classList.remove("active");
+        });
+
+        button.classList.add("active");
+        selectedPayment = button.dataset.payment;
+    });
+});
+
+// ============================================================
+// КОММЕНТАРИИ К ЗАКАЗУ
+// ============================================================
+
+document.querySelectorAll(".tag").forEach(tag => {
+    tag.addEventListener("click", () => {
+        const text = tag.dataset.comment;
+
+        tag.classList.toggle("active");
+
+        if (selectedComments.includes(text)) {
+            selectedComments = selectedComments.filter(
+                item => item !== text
+            );
+        } else {
+            selectedComments.push(text);
+        }
+
+        updateCommentField();
+    });
+});
+
+function updateCommentField() {
+    const customText = commentInput.dataset.customText || "";
+    const tagsText = selectedComments.join(", ");
+
+    if (tagsText && customText) {
+        commentInput.value = tagsText + ". " + customText;
+    } else if (tagsText) {
+        commentInput.value = tagsText;
+    } else {
+        commentInput.value = customText;
+    }
+}
+
+commentInput.addEventListener("input", () => {
+    commentInput.dataset.customText = commentInput.value;
+});
+
+// ============================================================
+// КАРТА И МАРШРУТ
+// ============================================================
+
+function updateMap() {
+    const from = fromInput.value.trim();
+    const to = toInput.value.trim();
+
+    if (from && to) {
+        mapStatus.textContent =
+            "Маршрут указан. После расчёта координат здесь будет показан фактический маршрут.";
+    } else {
+        mapStatus.textContent =
+            "Введите адреса, чтобы увидеть маршрут.";
+    }
+}
+
+// ============================================================
+// ПРОВЕРКА ФОРМЫ
+// ============================================================
+
+function isFormValid() {
+    const from = fromInput.value.trim();
+    const to = toInput.value.trim();
+
+    return from.length > 0 && to.length > 0;
+}
+
+function updateOrderButton() {
+    const valid = isFormValid();
+
+    orderButton.disabled = !valid;
+
+    if (valid) {
+        priceStatus.textContent =
+            "Стоимость будет рассчитана по маршруту";
+    } else {
+        priceElement.textContent = "—";
+
+        priceStatus.textContent =
+            "Введите маршрут для расчёта";
+    }
+
+    updateMap();
+}
+
+// ============================================================
+// ИЗМЕНЕНИЕ ДАТЫ И ВРЕМЕНИ ВРУЧНУЮ
+// ============================================================
+
+dateInput.addEventListener("change", () => {
+    selectedTime = "custom";
+
+    document.querySelectorAll(".quick-time-button").forEach(item => {
+        item.classList.remove("active");
+    });
+});
+
+timeInput.addEventListener("change", () => {
+    selectedTime = "custom";
+
+    document.querySelectorAll(".quick-time-button").forEach(item => {
+        item.classList.remove("active");
+    });
+});
+
+// ============================================================
+// ОТПРАВКА ЗАКАЗА В TELEGRAM-БОТ
+// ============================================================
+
+orderButton.addEventListener("click", () => {
+    if (!isFormValid()) {
+        tg.showAlert("Укажите адрес отправления и адрес назначения.");
+        return;
+    }
+
+    if (!dateInput.value || !timeInput.value) {
+        tg.showAlert("Укажите дату и время поездки.");
+        return;
+    }
+
+    if (typeof tg.sendData !== "function") {
+        tg.showAlert(
+            "Не удалось подключить отправку заказа. " +
+            "Откройте приложение через кнопку в Telegram."
+        );
+        return;
+    }
+
+    const order = {
+        from: fromInput.value.trim(),
+        to: toInput.value.trim(),
+
+        passengers: passengers,
+
+        date: dateInput.value,
+        time: timeInput.value,
+
+        // Эти поля понимает существующий обработчик messages.py.
+        selected_time: selectedTime,
+        time_type: selectedTime,
+
+        tariff: "economy",
+        payment: selectedPayment,
+
+        comment: commentInput.value.trim()
+    };
+
+    try {
+        const orderJson = JSON.stringify(order);
+
+        console.log("Отправка заказа в Telegram:", order);
+
+        // Telegram передаст JSON боту как message.web_app_data.
+        // Mini App после отправки закрывается.
+        tg.sendData(orderJson);
+    } catch (error) {
+        console.error("Ошибка отправки заказа:", error);
+
+        tg.showAlert(
+            "Не удалось отправить заказ. Попробуйте ещё раз."
+        );
+    }
+});
+
+// ============================================================
+// ИНИЦИАЛИЗАЦИЯ
+// ============================================================
+
+setNow();
+updateOrderButton();
+

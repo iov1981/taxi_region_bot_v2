@@ -1,0 +1,1203 @@
+import html
+import json
+from html.parser import HTMLParser
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from aiogram import Router, F
+from aiogram.types import (
+    Message,
+    KeyboardButton,
+    ReplyKeyboardMarkup
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from app.config import get_admin_id, get_drivers_chat_id
+
+from app.db import (
+    create_request,
+    save_phone,
+    save_admin_message_id,
+    get_request
+)
+
+from app.services.ai_parser import parse_request
+from app.services.route_service import get_route_distance
+from app.services.pricing import (
+    calculate_trip_price,
+    get_trip_type,
+    format_price
+)
+
+from app.handlers.start import client_menu
+
+
+router = Router()
+
+print("messages.py загружен")
+
+
+# ============================================================
+# HTML-ПРОВЕРКА
+# ============================================================
+
+class TelegramHTMLValidator(HTMLParser):
+
+    ALLOWED_TAGS = {
+        "b",
+        "strong",
+        "i",
+        "em",
+        "u",
+        "ins",
+        "s",
+        "strike",
+        "del",
+        "code",
+        "pre",
+        "a",
+        "tg-spoiler",
+        "blockquote",
+    }
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.errors = []
+        self.open_tags = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+
+        if tag not in self.ALLOWED_TAGS:
+            self.errors.append(
+                f"Недопустимый HTML-тег: <{tag}>"
+            )
+            return
+
+        self.open_tags.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        tag = tag.lower()
+
+        if tag not in self.ALLOWED_TAGS:
+            self.errors.append(
+                f"Недопустимый HTML-тег: <{tag}/>"
+            )
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+
+        if tag not in self.ALLOWED_TAGS:
+            self.errors.append(
+                f"Недопустимый закрывающий тег: </{tag}>"
+            )
+            return
+
+        if not self.open_tags:
+            self.errors.append(
+                f"Лишний закрывающий тег: </{tag}>"
+            )
+            return
+
+        if self.open_tags[-1] != tag:
+            self.errors.append(
+                "Нарушена вложенность HTML: "
+                f"ожидался </{self.open_tags[-1]}>, "
+                f"получен </{tag}>"
+            )
+            return
+
+        self.open_tags.pop()
+
+    def handle_comment(self, data):
+        self.errors.append(
+            "HTML-комментарии запрещены."
+        )
+
+
+def validate_html(text: str) -> tuple[bool, list[str]]:
+
+    if not isinstance(text, str):
+        return False, [
+            "Текст сообщения не является строкой."
+        ]
+
+    parser = TelegramHTMLValidator()
+
+    try:
+        parser.feed(text)
+        parser.close()
+
+    except Exception as error:
+        parser.errors.append(
+            f"Ошибка HTML-парсера: {error}"
+        )
+
+    if parser.open_tags:
+        parser.errors.append(
+            "Не закрыты HTML-теги: "
+            + ", ".join(
+                f"<{tag}>"
+                for tag in parser.open_tags
+            )
+        )
+
+    return len(parser.errors) == 0, parser.errors
+
+
+def escape_html(value) -> str:
+
+    if value is None:
+        return ""
+
+    return html.escape(
+        str(value),
+        quote=False
+    )
+
+
+async def send_html_message(bot, chat_id, text, **kwargs):
+
+    valid, errors = validate_html(text)
+
+    if valid:
+        return await bot.send_message(
+            chat_id,
+            text,
+            parse_mode="HTML",
+            **kwargs
+        )
+
+    print()
+    print("=" * 60)
+    print("❌ ОШИБКА HTML ПЕРЕД ОТПРАВКОЙ")
+    print("=" * 60)
+
+    for error in errors:
+        print("HTML:", error)
+
+    print()
+    print("ТЕКСТ С ОШИБКОЙ:")
+    print(text)
+    print("=" * 60)
+
+    safe_text = html.escape(
+        text,
+        quote=False
+    )
+
+    return await bot.send_message(
+        chat_id,
+        safe_text,
+        **kwargs
+    )
+
+
+# ============================================================
+# СЛУЖЕБНЫЕ СООБЩЕНИЯ
+# ============================================================
+
+def is_internal_message(text: str) -> bool:
+
+    if not text:
+        return False
+
+    text = text.strip()
+
+    internal_prefixes = (
+        "ГЕОКОДИРОВАНИЕ:",
+        "GEOAPIFY:",
+        "GEOAPIFY ПОИСК",
+        "ПОСТРОЕНИЕ МАРШРУТА",
+        "ROUTE SERVICE",
+    )
+
+    return any(
+        text.startswith(prefix)
+        for prefix in internal_prefixes
+    )
+
+
+# ============================================================
+# КНОПКА ДЛЯ ВОДИТЕЛЯ
+# ============================================================
+
+def drivers_order_keyboard(request_id):
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="🟢 БЕРУ ЗАКАЗ",
+        callback_data=f"driver_wants:{request_id}"
+    )
+
+    return builder.as_markup()
+
+
+# ============================================================
+# ОБНОВЛЕНИЕ КАРТОЧКИ АДМИНИСТРАТОРА
+# ============================================================
+
+async def update_admin_order_card(
+    message: Message,
+    request: dict,
+    phone: str
+):
+
+    try:
+        admin_message_id = request["admin_message_id"]
+
+        if not admin_message_id:
+            print("⚠️ У заявки нет admin_message_id")
+            return
+
+        from app.handlers.admin import order_keyboard
+
+        if message.from_user.username:
+            client_name = f"@{message.from_user.username}"
+        else:
+            client_name = (
+                message.from_user.first_name or "не указан"
+            )
+
+        updated_admin_text = (
+            f"🚕 <b>НОВАЯ ЗАЯВКА №"
+            f"{request['id']}</b>\n\n"
+
+            f"👤 <b>Клиент:</b> "
+            f"{escape_html(client_name)}\n"
+
+            f"🆔 <b>ID:</b> "
+            f"{escape_html(message.from_user.id)}\n"
+
+            f"📞 <b>Телефон:</b> "
+            f"{escape_html(phone)}\n\n"
+
+            f"{request['ai_summary']}\n"
+
+            f"📝 <b>Сообщение клиента:</b>\n"
+            f"{escape_html(request['raw_text'])}"
+        )
+
+        valid, errors = validate_html(updated_admin_text)
+
+        if not valid:
+            print(
+                "❌ HTML карточки администратора "
+                "не прошёл проверку."
+            )
+
+            for error in errors:
+                print("HTML:", error)
+
+            return
+
+        await message.bot.edit_message_text(
+            chat_id=get_admin_id(),
+            message_id=admin_message_id,
+            text=updated_admin_text,
+            parse_mode="HTML",
+            reply_markup=order_keyboard(request)
+        )
+
+        print("✅ КАРТОЧКА АДМИНА ОБНОВЛЕНА ТЕЛЕФОНОМ")
+        print("REQUEST ID:", request["id"])
+        print("PHONE:", phone)
+
+    except Exception as error:
+        print("❌ ОШИБКА ОБНОВЛЕНИЯ КАРТОЧКИ АДМИНА:")
+        print(type(error).__name__, repr(error))
+
+
+# ============================================================
+# СОХРАНЕНИЕ ТЕЛЕФОНА
+# ============================================================
+
+async def process_phone(message: Message, phone: str):
+
+    phone = phone.strip()
+
+    print()
+    print("=" * 60)
+    print("ПОЛУЧЕН ТЕЛЕФОН КЛИЕНТА")
+    print("=" * 60)
+    print("USER ID:", message.from_user.id)
+    print("PHONE:", phone)
+    print("=" * 60)
+
+    try:
+        request = await save_phone(
+            message.from_user.id,
+            phone
+        )
+
+        if not request:
+            await message.answer(
+                "⚠️ У вас пока нет активной заявки.\n\n"
+                "Сначала отправьте маршрут поездки.",
+                reply_markup=client_menu()
+            )
+            return True
+
+        request_id = request["id"]
+
+        print("ЗАЯВКА ДЛЯ ТЕЛЕФОНА:", request_id)
+
+        await update_admin_order_card(
+            message,
+            request,
+            phone
+        )
+
+        await send_html_message(
+            message.bot,
+            message.chat.id,
+            "📞 <b>Телефон сохранён.</b>\n\n"
+            "Администратор увидит его в заявке.",
+            reply_markup=client_menu()
+        )
+
+        print(
+            "✅ ТЕЛЕФОН СОХРАНЁН "
+            f"ДЛЯ ЗАКАЗА №{request_id}"
+        )
+
+        return True
+
+    except Exception as error:
+        print("❌ ОШИБКА СОХРАНЕНИЯ ТЕЛЕФОНА:")
+        print(type(error).__name__, repr(error))
+
+        await message.answer(
+            "❌ Не удалось сохранить номер телефона.\n"
+            "Попробуйте отправить его ещё раз.",
+            reply_markup=client_menu()
+        )
+
+        return True
+
+
+# ============================================================
+# ТЕКУЩАЯ ДАТА ПО МОСКОВСКОМУ ВРЕМЕНИ
+# ============================================================
+
+def get_moscow_now() -> datetime:
+
+    return datetime.now(
+        ZoneInfo("Europe/Moscow")
+    )
+
+
+# ============================================================
+# ОПРЕДЕЛЕНИЕ ВРЕМЕНИ MINI APP
+# ============================================================
+
+def get_mini_app_time_text(data: dict) -> str:
+
+    selected_time = str(
+        data.get("selected_time", "")
+    ).strip().lower()
+
+    time_type = str(
+        data.get("time_type", "")
+    ).strip().lower()
+
+    time_value = str(
+        data.get("time", "")
+    ).strip()
+
+    date_value = str(
+        data.get("date", "")
+    ).strip()
+
+    raw_text = str(
+        data.get("text", "")
+    ).strip().lower()
+
+    if selected_time in {"now", "сейчас"}:
+        return "сейчас"
+
+    if time_type in {"now", "сейчас"}:
+        return "сейчас"
+
+    if selected_time in {"30min", "30", "через 30 минут"}:
+        return "через 30 минут"
+
+    if time_type in {"30min", "30", "через 30 минут"}:
+        return "через 30 минут"
+
+    if selected_time in {"tomorrow", "завтра"}:
+        return f"завтра в {time_value}" if time_value else "завтра"
+
+    if time_type in {"tomorrow", "завтра"}:
+        return f"завтра в {time_value}" if time_value else "завтра"
+
+    if "сейчас" in raw_text:
+        return "сейчас"
+
+    if "через 30 минут" in raw_text:
+        return "через 30 минут"
+
+    if date_value and time_value:
+        try:
+            now = get_moscow_now()
+
+            normalized_date = (
+                date_value.replace("/", "-").strip()
+            )
+
+            normalized_time = time_value.strip()
+            parsed_date = None
+
+            for date_format in (
+                "%Y-%m-%d",
+                "%d.%m.%Y",
+                "%d-%m-%Y",
+            ):
+                try:
+                    parsed_date = datetime.strptime(
+                        normalized_date,
+                        date_format
+                    ).date()
+                    break
+                except ValueError:
+                    continue
+
+            if parsed_date is not None:
+                parsed_datetime = None
+
+                for time_format in ("%H:%M", "%H:%M:%S"):
+                    try:
+                        parsed_time = datetime.strptime(
+                            normalized_time,
+                            time_format
+                        ).time()
+
+                        parsed_datetime = datetime.combine(
+                            parsed_date,
+                            parsed_time,
+                            tzinfo=ZoneInfo("Europe/Moscow")
+                        )
+                        break
+                    except ValueError:
+                        continue
+
+                if parsed_datetime is not None:
+                    difference_seconds = abs(
+                        (now - parsed_datetime).total_seconds()
+                    )
+
+                    if difference_seconds <= 180:
+                        return "сейчас"
+
+        except Exception as error:
+            print(
+                "⚠️ Не удалось определить "
+                "текущее время Mini App:",
+                repr(error)
+            )
+
+    if date_value and time_value:
+        return f"{date_value} в {time_value}"
+
+    if time_value:
+        return time_value
+
+    if date_value:
+        return date_value
+
+    return ""
+
+
+# ============================================================
+# ОЧИСТКА ТЕКСТА MINI APP ДЛЯ ПАРСЕРА
+# ============================================================
+
+def clean_mini_app_route_text(text: str) -> str:
+
+    if not text:
+        return text
+
+    result = str(text).strip()
+
+    time_markers = (
+        "через 30 минут",
+        "через час",
+        "через 1 час",
+        "сейчас",
+        "завтра",
+        "послезавтра",
+    )
+
+    for marker in time_markers:
+        result = result.replace(
+            f", {marker}",
+            ""
+        )
+
+        lower_result = result.lower()
+
+        if lower_result.endswith(f" {marker}"):
+            result = result[
+                :len(result) - len(marker)
+            ].rstrip(" ,")
+
+    return result.strip()
+
+
+# ============================================================
+# ДАННЫЕ MINI APP
+# ============================================================
+
+def build_mini_app_text(data: dict) -> str:
+
+    from_place = str(
+        data.get("from", "")
+    ).strip()
+
+    to_place = str(
+        data.get("to", "")
+    ).strip()
+
+    passengers = data.get("passengers", 1)
+
+    try:
+        passengers = int(passengers)
+    except (TypeError, ValueError):
+        passengers = 1
+
+    if passengers < 1:
+        passengers = 1
+
+    time_text = get_mini_app_time_text(data)
+
+    comment = str(
+        data.get("comment", "")
+    ).strip()
+
+    result = (
+        f"{from_place} — "
+        f"{to_place}, "
+        f"{passengers} человек"
+    )
+
+    if time_text:
+        result += f", {time_text}"
+
+    if comment:
+        result += f", {comment}"
+
+    return result.strip()
+
+
+# ============================================================
+# ОБРАБОТКА СООБЩЕНИЯ КЛИЕНТА
+# ============================================================
+
+@router.message(
+    F.chat.id > 0,
+    F.text | F.contact | F.web_app_data
+)
+async def handle_message(message: Message):
+
+    # ========================================================
+    # TELEGRAM-КОНТАКТ
+    # ========================================================
+
+    if message.contact:
+        phone = message.contact.phone_number.strip()
+
+        print()
+        print("=" * 60)
+        print("ПОЛУЧЕН КОНТАКТ КЛИЕНТА")
+        print("=" * 60)
+        print("USER ID:", message.from_user.id)
+        print("CONTACT USER ID:", message.contact.user_id)
+        print("PHONE:", phone)
+        print("=" * 60)
+
+        if (
+            message.contact.user_id is not None
+            and message.contact.user_id != message.from_user.id
+        ):
+            await message.answer(
+                "⚠️ Пожалуйста, отправьте "
+                "свой номер телефона.",
+                reply_markup=client_menu()
+            )
+            return
+
+        await process_phone(message, phone)
+        return
+
+    # ========================================================
+    # MINI APP
+    # ========================================================
+
+    data = None
+    is_mini_app = bool(message.web_app_data)
+
+    if is_mini_app:
+        print()
+        print("=" * 60)
+        print("ПОЛУЧЕН ЗАКАЗ ИЗ MINI APP")
+        print("=" * 60)
+        print("USER ID:", message.from_user.id)
+        print("USERNAME:", message.from_user.username)
+        print("NAME:", message.from_user.first_name)
+        print("RAW MINI APP DATA:", message.web_app_data.data)
+        print("=" * 60)
+
+        try:
+            data = json.loads(message.web_app_data.data)
+        except json.JSONDecodeError as error:
+            print("❌ ОШИБКА JSON MINI APP:", repr(error))
+
+            await message.answer(
+                "❌ Не удалось получить данные "
+                "заказа из Mini App.\n\n"
+                "Попробуйте оформить заказ ещё раз.",
+                reply_markup=client_menu()
+            )
+            return
+
+        if not isinstance(data, dict):
+            await message.answer(
+                "❌ Неверный формат заказа.",
+                reply_markup=client_menu()
+            )
+            return
+
+        from_place = str(data.get("from", "")).strip()
+        to_place = str(data.get("to", "")).strip()
+
+        if not from_place or not to_place:
+            await message.answer(
+                "⚠️ Укажите адрес отправления "
+                "и адрес назначения.",
+                reply_markup=client_menu()
+            )
+            return
+
+        text = build_mini_app_text(data)
+
+        print("СФОРМИРОВАН ТЕКСТ ЗАЯВКИ:")
+        print(text)
+        print("ВРЕМЯ MINI APP:")
+        print(get_mini_app_time_text(data))
+        print("=" * 60)
+
+    else:
+        text = (message.text or "").strip()
+
+        if not text:
+            return
+
+    # ========================================================
+    # ЗАЩИТА ОТ СЛУЖЕБНЫХ СООБЩЕНИЙ
+    # ========================================================
+
+    if is_internal_message(text):
+        print()
+        print("=" * 60)
+        print("⚠️ СЛУЖЕБНОЕ СООБЩЕНИЕ")
+        print("=" * 60)
+        print("USER ID:", message.from_user.id)
+        print("TEXT:", text)
+        print("СООБЩЕНИЕ НЕ БУДЕТ ОБРАБОТАНО КАК ЗАЯВКА.")
+        print("=" * 60)
+        return
+
+    # ========================================================
+    # ЛОГИРОВАНИЕ
+    # ========================================================
+
+    print()
+    print("=" * 60)
+    print("ПОЛУЧЕНО СООБЩЕНИЕ ОТ КЛИЕНТА")
+    print("=" * 60)
+    print("USER ID:", message.from_user.id)
+    print("USERNAME:", message.from_user.username)
+    print("NAME:", message.from_user.first_name)
+    print("TEXT:", text)
+    print("=" * 60)
+
+    # ========================================================
+    # ПРОВЕРКА ТЕЛЕФОНА
+    # ========================================================
+
+    phone_text = (
+        text.replace(" ", "")
+        .replace("-", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
+
+    if phone_text.startswith("8") and len(phone_text) == 11:
+        phone_text = "+7" + phone_text[1:]
+
+    if (
+        phone_text.startswith("+7")
+        and phone_text[1:].isdigit()
+        and len(phone_text) == 12
+    ):
+        await process_phone(message, phone_text)
+        return
+
+    # ========================================================
+    # ТЕКСТ ДЛЯ ПАРСЕРА
+    # ========================================================
+
+    parser_text = text
+
+    if is_mini_app:
+        parser_text = clean_mini_app_route_text(text)
+
+        print()
+        print("=" * 60)
+        print("ОЧИСТКА ТЕКСТА MINI APP ДЛЯ ПАРСЕРА")
+        print("=" * 60)
+        print("БЫЛО:")
+        print(text)
+        print()
+        print("СТАЛО:")
+        print(parser_text)
+        print("=" * 60)
+
+    # ========================================================
+    # РАЗБОР ЗАЯВКИ
+    # ========================================================
+
+    try:
+        parsed = await parse_request(parser_text)
+
+    except Exception as error:
+        print("ОШИБКА ПАРСЕРА:", repr(error))
+
+        await send_html_message(
+            message.bot,
+            message.chat.id,
+            "❌ <b>Не удалось разобрать заявку.</b>\n\n"
+            "Пример:\n"
+            "Пенза — Воробьевка, "
+            "2 человека, завтра утром",
+            reply_markup=client_menu()
+        )
+        return
+
+    # ========================================================
+    # ДАННЫЕ ИЗ ПАРСЕРА
+    # ========================================================
+
+    from_place = parsed.get("from_place")
+    to_place = parsed.get("to_place")
+    from_address = parsed.get("from_address")
+    to_address = parsed.get("to_address")
+
+    date = parsed.get("date", "не указана")
+    time = parsed.get("time", "не указано")
+    passengers = parsed.get("passengers", "не указано")
+
+    if not from_place:
+        from_place = "не определено"
+
+    if not to_place:
+        to_place = "не определено"
+
+    if not from_address:
+        from_address = "не указан"
+
+    if not to_address:
+        to_address = "не указан"
+
+    # ========================================================
+    # ДОПОЛНИТЕЛЬНАЯ ЗАЩИТА АДРЕСОВ MINI APP
+    # ========================================================
+
+    if is_mini_app:
+        to_address = clean_mini_app_route_text(to_address)
+        from_address = clean_mini_app_route_text(from_address)
+        to_place = clean_mini_app_route_text(to_place)
+        from_place = clean_mini_app_route_text(from_place)
+
+        print()
+        print("=" * 60)
+        print("АДРЕСА MINI APP ПОСЛЕ ОЧИСТКИ")
+        print("=" * 60)
+        print("ОТКУДА:", from_place)
+        print("КУДА:", to_place)
+        print("АДРЕС ОТКУДА:", from_address)
+        print("АДРЕС КУДА:", to_address)
+        print("=" * 60)
+
+    # ========================================================
+    # ИСПРАВЛЕНИЕ ВРЕМЕНИ ДЛЯ MINI APP
+    # ========================================================
+
+    if is_mini_app:
+        try:
+            mini_app_time = get_mini_app_time_text(data)
+
+            if mini_app_time:
+                if mini_app_time == "сейчас":
+                    date = get_moscow_now().strftime("%Y-%m-%d")
+                    time = "сейчас"
+
+                elif mini_app_time == "через 30 минут":
+                    date = get_moscow_now().strftime("%Y-%m-%d")
+                    time = "через 30 минут"
+
+                elif mini_app_time.startswith("завтра"):
+                    date = "завтра"
+
+                    if " в " in mini_app_time:
+                        time = mini_app_time.split(" в ", 1)[1]
+                    else:
+                        time = "не указано"
+
+        except Exception as error:
+            print(
+                "⚠️ ОШИБКА НОРМАЛИЗАЦИИ "
+                "ВРЕМЕНИ MINI APP:",
+                repr(error)
+            )
+
+    # ========================================================
+    # ТИП ПОЕЗДКИ И ТАРИФ
+    # ========================================================
+
+    trip_type_code = get_trip_type(
+        from_place,
+        to_place
+    )
+
+    if trip_type_code == "suburban":
+        trip_type = "🚕 Пригородная поездка"
+
+    elif trip_type_code == "city":
+        trip_type = "🏙 Городская поездка"
+
+    else:
+        trip_type = "🛣 Межгород"
+
+    # ========================================================
+    # ТОЧКИ МАРШРУТА
+    # ========================================================
+
+    route_from = (
+        from_address
+        if from_address != "не указан"
+        else from_place
+    )
+
+    route_to = (
+        to_address
+        if to_address != "не указан"
+        else to_place
+    )
+
+    if is_mini_app:
+        route_from = clean_mini_app_route_text(route_from)
+        route_to = clean_mini_app_route_text(route_to)
+
+    distance_km = None
+    price = None
+
+    # ========================================================
+    # ПОСТРОЕНИЕ МАРШРУТА И РАСЧЁТ ЦЕНЫ
+    # ========================================================
+
+    if (
+        route_from != "не определено"
+        and route_to != "не определено"
+    ):
+        print()
+        print("=" * 60)
+        print("ПОСТРОЕНИЕ МАРШРУТА")
+        print("=" * 60)
+        print("ОТКУДА:", route_from)
+        print("КУДА:", route_to)
+        print("ТИП ПОЕЗДКИ:", trip_type_code)
+        print("=" * 60)
+
+        try:
+            distance_km = await get_route_distance(
+                route_from,
+                route_to
+            )
+
+            if distance_km is not None:
+                price = calculate_trip_price(
+                    distance_km,
+                    from_place,
+                    to_place
+                )
+
+                print("РАССТОЯНИЕ:", distance_km, "км")
+                print("ТИП ТАРИФА:", trip_type_code)
+                print("ЦЕНА:", price, "₽")
+
+            else:
+                print("РАССТОЯНИЕ НЕ ОПРЕДЕЛЕНО")
+
+        except Exception as error:
+            print("ОШИБКА МАРШРУТА:", repr(error))
+
+    # ========================================================
+    # КРАТКАЯ ИНФОРМАЦИЯ О ЗАКАЗЕ
+    # ========================================================
+
+    ai_summary = (
+        f"📍 <b>Откуда:</b> "
+        f"{escape_html(from_place)}\n"
+
+        f"🏁 <b>Куда:</b> "
+        f"{escape_html(to_place)}\n"
+
+        f"{trip_type}\n"
+
+        f"📅 <b>Дата:</b> "
+        f"{escape_html(date)}\n"
+
+        f"🕐 <b>Время:</b> "
+        f"{escape_html(time)}\n"
+
+        f"👥 <b>Пассажиров:</b> "
+        f"{escape_html(passengers)}\n"
+    )
+
+    if distance_km is not None:
+        ai_summary += (
+            f"📏 <b>Расстояние:</b> "
+            f"{escape_html(distance_km)} км\n"
+        )
+
+    if price is not None:
+        ai_summary += (
+            f"💰 <b>Стоимость:</b> "
+            f"{escape_html(format_price(price))}\n"
+        )
+
+    # ========================================================
+    # СОЗДАНИЕ ЗАКАЗА
+    # ========================================================
+
+    try:
+        request_id = await create_request(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            raw_text=text,
+            ai_summary=ai_summary,
+            distance_km=distance_km,
+            price=price
+        )
+
+    except Exception as error:
+        print("❌ ОШИБКА СОЗДАНИЯ ЗАЯВКИ:")
+        print(type(error).__name__, repr(error))
+
+        await send_html_message(
+            message.bot,
+            message.chat.id,
+            "❌ Не удалось создать заявку.\n\n"
+            "Попробуйте отправить её ещё раз.",
+            reply_markup=client_menu()
+        )
+        return
+
+    print()
+    print("=" * 60)
+    print("ЗАЯВКА СОЗДАНА")
+    print("НОМЕР:", request_id)
+    print("=" * 60)
+
+    # ========================================================
+    # ИМЯ КЛИЕНТА
+    # ========================================================
+
+    if message.from_user.username:
+        client_name = f"@{message.from_user.username}"
+    else:
+        client_name = message.from_user.first_name or "не указан"
+
+    # ========================================================
+    # КАРТОЧКА АДМИНИСТРАТОРА
+    # ========================================================
+
+    admin_text = (
+        f"🚕 <b>НОВАЯ ЗАЯВКА №"
+        f"{request_id}</b>\n\n"
+
+        f"👤 <b>Клиент:</b> "
+        f"{escape_html(client_name)}\n"
+
+        f"🆔 <b>ID:</b> "
+        f"{escape_html(message.from_user.id)}\n"
+
+        f"📞 <b>Телефон:</b> не указан\n\n"
+
+        f"{ai_summary}\n"
+
+        f"📝 <b>Сообщение клиента:</b>\n"
+        f"{escape_html(text)}"
+    )
+
+    print()
+    print("=" * 60)
+    print("ОТПРАВКА КАРТОЧКИ АДМИНУ")
+    print("=" * 60)
+    print("ADMIN ID:", get_admin_id())
+    print("REQUEST ID:", request_id)
+    print("КЛИЕНТ:", client_name)
+    print("=" * 60)
+
+    try:
+        admin_message = await send_html_message(
+            message.bot,
+            get_admin_id(),
+            admin_text
+        )
+
+        print("✅ КАРТОЧКА АДМИНУ ОТПРАВЛЕНА")
+
+        try:
+            await save_admin_message_id(
+                request_id,
+                admin_message.message_id
+            )
+            print("✅ admin_message_id сохранён.")
+
+        except Exception as error:
+            print(
+                "ОШИБКА СОХРАНЕНИЯ admin_message_id:",
+                repr(error)
+            )
+
+        try:
+            from app.handlers.admin import order_keyboard
+
+            request = await get_request(request_id)
+
+            if request:
+                await admin_message.edit_reply_markup(
+                    reply_markup=order_keyboard(request)
+                )
+                print("✅ КНОПКИ КАРТОЧКИ АДМИНА ДОБАВЛЕНЫ")
+
+        except Exception as error:
+            print(
+                "ОШИБКА ДОБАВЛЕНИЯ КНОПОК АДМИНУ:",
+                repr(error)
+            )
+
+    except Exception as error:
+        print("❌ ОШИБКА ОТПРАВКИ КАРТОЧКИ АДМИНУ")
+        print(type(error).__name__, repr(error))
+
+    # ========================================================
+    # ЗАКАЗ В ГРУППУ ВОДИТЕЛЕЙ
+    # ========================================================
+
+    driver_text = (
+        f"🚕 <b>НОВЫЙ ЗАКАЗ №"
+        f"{request_id}</b>\n\n"
+
+        f"📍 <b>Откуда:</b> "
+        f"{escape_html(from_place)}\n"
+
+        f"🏁 <b>Куда:</b> "
+        f"{escape_html(to_place)}\n"
+
+        f"{trip_type}\n"
+
+        f"📅 <b>Дата:</b> "
+        f"{escape_html(date)}\n"
+
+        f"🕐 <b>Время:</b> "
+        f"{escape_html(time)}\n"
+
+        f"👥 <b>Пассажиров:</b> "
+        f"{escape_html(passengers)}\n"
+    )
+
+    if distance_km is not None:
+        driver_text += (
+            f"📏 <b>Расстояние:</b> "
+            f"{escape_html(distance_km)} км\n"
+        )
+
+    if price is not None:
+        driver_text += (
+            f"💰 <b>Стоимость:</b> "
+            f"{escape_html(format_price(price))}\n"
+        )
+
+    print()
+    print("=" * 60)
+    print("ОТПРАВКА ЗАКАЗА ВОДИТЕЛЯМ")
+    print("=" * 60)
+    print("DRIVERS CHAT ID:", get_drivers_chat_id())
+    print("REQUEST ID:", request_id)
+    print("=" * 60)
+
+    try:
+        driver_message = await send_html_message(
+            message.bot,
+            get_drivers_chat_id(),
+            driver_text,
+            reply_markup=drivers_order_keyboard(request_id)
+        )
+
+        print("✅ ЗАКАЗ ОТПРАВЛЕН В ГРУППУ ВОДИТЕЛЕЙ")
+        print("MESSAGE ID:", driver_message.message_id)
+        print("✅ КНОПКА 🟢 БЕРУ ЗАКАЗ ДОБАВЛЕНА")
+
+    except Exception as error:
+        print("❌ ОШИБКА ОТПРАВКИ ЗАКАЗА ВОДИТЕЛЯМ")
+        print(type(error).__name__, repr(error))
+
+    # ========================================================
+    # ОТВЕТ КЛИЕНТУ
+    # ========================================================
+
+    client_result = (
+        "✅ <b>Заявка принята</b>\n\n"
+
+        f"🚕 <b>Номер заказа:</b> "
+        f"№{request_id}\n\n"
+
+        f"{ai_summary}\n\n"
+
+        "📞 <b>Теперь отправьте номер телефона.</b>\n"
+
+        "Нажмите кнопку ниже или отправьте номер "
+        "обычным сообщением."
+    )
+
+    phone_keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="📞 Отправить номер телефона",
+                    request_contact=True
+                )
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+    await send_html_message(
+        message.bot,
+        message.chat.id,
+        client_result,
+        reply_markup=phone_keyboard
+    )
+
+    print()
+    print("=" * 60)
+    print("ОБРАБОТКА ЗАЯВКИ ЗАВЕРШЕНА")
+    print("НОМЕР ЗАКАЗА:", request_id)
+    print("=" * 60)
+    print()

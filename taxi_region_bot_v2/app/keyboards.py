@@ -1,7 +1,20 @@
 from aiogram.types import (
     ReplyKeyboardMarkup,
-    KeyboardButton
+    KeyboardButton,
+    WebAppInfo
 )
+
+import os
+
+
+# ============================================================
+# URL MINI APP
+# ============================================================
+
+WEBAPP_URL = os.getenv(
+    "WEBAPP_URL",
+    "https://taxi-region-bot-v2.fadehost.app/webapp/",
+).strip()
 
 
 # ============================================================
@@ -10,24 +23,54 @@ from aiogram.types import (
 
 def client_menu():
 
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
+    keyboard = []
+
+    # --------------------------------------------------------
+    # MINI APP
+    # --------------------------------------------------------
+
+    if WEBAPP_URL:
+
+        keyboard.append(
             [
                 KeyboardButton(
-                    text="📞 Отправить телефон",
-                    request_contact=True
-                )
-            ],
-            [
-                KeyboardButton(
-                    text="ℹ️ Как это работает"
+                    text="🚕 Заказать через приложение",
+                    web_app=WebAppInfo(
+                        url=WEBAPP_URL
+                    )
                 )
             ]
-        ],
-        resize_keyboard=True
+        )
+
+    # --------------------------------------------------------
+    # ТЕЛЕФОН
+    # --------------------------------------------------------
+
+    keyboard.append(
+        [
+            KeyboardButton(
+                text="📞 Отправить телефон",
+                request_contact=True
+            )
+        ]
     )
 
-    return keyboard
+    # --------------------------------------------------------
+    # ПОМОЩЬ
+    # --------------------------------------------------------
+
+    keyboard.append(
+        [
+            KeyboardButton(
+                text="ℹ️ Как это работает"
+            )
+        ]
+    )
+
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True
+    )
 
 
 # ============================================================

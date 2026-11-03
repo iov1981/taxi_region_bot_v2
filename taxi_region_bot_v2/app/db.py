@@ -1,4 +1,3 @@
-
 import aiosqlite
 
 
@@ -336,14 +335,13 @@ async def save_phone(
 
         db.row_factory = aiosqlite.Row
 
-        # Берём самую свежую активную заявку
-        # именно этого клиента.
+        # Берём самую свежую актуальную заявку клиента (со статусом 'new' или 'taken')
         cur = await db.execute(
             """
             SELECT *
             FROM requests
             WHERE telegram_id = ?
-            AND status = 'new'
+            AND status IN ('new', 'taken')
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -371,7 +369,7 @@ async def save_phone(
 
         await db.commit()
 
-        # Получаем обновлённую заявку.
+        # Получаем обновлённую заявку со всеми полями
         cur = await db.execute(
             """
             SELECT *
@@ -706,4 +704,3 @@ async def get_order_history(limit=20):
         )
 
         return await cur.fetchall()
-

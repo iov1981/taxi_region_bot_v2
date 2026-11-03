@@ -1,0 +1,27 @@
+from app.services.pricing import (
+    get_trip_type,
+    calculate_trip_price,
+    format_price
+)
+
+tests = [
+    ("Пенза", "Заречный", 20),
+    ("Заречный", "Пенза", 20),
+    ("Пенза", "Пенза", 10),
+    ("Пенза", "Воробьевка", 50),
+]
+
+for origin, destination, distance in tests:
+    trip_type = get_trip_type(origin, destination)
+    price = calculate_trip_price(
+        distance,
+        origin,
+        destination
+    )
+
+    print(
+        f"{origin} → {destination}: "
+        f"{trip_type}, "
+        f"{distance} км, "
+        f"{format_price(price)}"
+    )

@@ -1,6 +1,12 @@
+.env
 .venv/
+venv/
 __pycache__/
 *.pyc
-.env
-taxi.db
+*.db
+*.sqlite3
+taxi
+test_route.db
 .idea/
+.vscode/
+test_route
