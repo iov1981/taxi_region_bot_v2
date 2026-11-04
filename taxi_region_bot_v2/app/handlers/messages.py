@@ -1,694 +1,329 @@
-import html
 import json
-from html.parser import HTMLParser
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-from aiogram import Router, F
-from aiogram.types import (
-    Message,
-    KeyboardButton,
-    ReplyKeyboardMarkup
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+import asyncio
+from aiogram import Router, F, Bot
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.config import get_admin_id, get_drivers_chat_id
 from app.db import (
     create_request,
+    get_request,
+    cancel_request,
     save_phone,
+    get_user_phone,
+    get_tariff_settings,
     save_admin_message_id,
-    get_request
+    get_ban_info
 )
-from app.services.ai_parser import parse_request, KNOWN_PLACES
+from app.services.parser import parse_order_text
 from app.services.route_service import get_route_distance
-from app.services.pricing import calculate_price, format_price
-from app.handlers.start import client_menu
-
+from app.services.price_service import calculate_price
+from app.handlers.drivers import driver_order_messages
 
 router = Router()
-
 print("messages.py загружен")
 
-
-# ============================================================
-# HTML-ПРОВЕРКА
-# ============================================================
-
-class TelegramHTMLValidator(HTMLParser):
-
-    ALLOWED_TAGS = {
-        "b",
-        "strong",
-        "i",
-        "em",
-        "u",
-        "ins",
-        "s",
-        "strike",
-        "del",
-        "code",
-        "pre",
-        "a",
-        "tg-spoiler",
-        "blockquote",
-    }
-
-    def __init__(self):
-        super().__init__(convert_charrefs=False)
-        self.errors = []
-        self.open_tags = []
-
-    def handle_starttag(self, tag, attrs):
-        tag = tag.lower()
-        if tag not in self.ALLOWED_TAGS:
-            self.errors.append(f"Недопустимый HTML-тег: <{tag}>")
-            return
-        self.open_tags.append(tag)
-
-    def handle_startendtag(self, tag, attrs):
-        tag = tag.lower()
-        if tag not in self.ALLOWED_TAGS:
-            self.errors.append(f"Недопустимый HTML-тег: <{tag}/>")
-
-    def handle_endtag(self, tag):
-        tag = tag.lower()
-        if tag not in self.ALLOWED_TAGS:
-            self.errors.append(f"Недопустимый закрывающий тег: </{tag}>")
-            return
-
-        if not self.open_tags:
-            self.errors.append(f"Лишний закрывающий тег: </{tag}>")
-            return
-
-        if self.open_tags[-1] != tag:
-            self.errors.append(
-                f"Нарушена вложенность HTML: ожидался </{self.open_tags[-1]}>, получен </{tag}>"
-            )
-            return
-
-        self.open_tags.pop()
-
-    def handle_comment(self, data):
-        self.errors.append("HTML-комментарии запрещены.")
+SEARCH_TIMEOUT_SECONDS = 600
 
 
-def validate_html(text: str) -> tuple[bool, list[str]]:
-    if not isinstance(text, str):
-        return False, ["Текст сообщения не является строкой."]
-
-    parser = TelegramHTMLValidator()
-    try:
-        parser.feed(text)
-        parser.close()
-    except Exception as error:
-        parser.errors.append(f"Ошибка HTML-парсера: {error}")
-
-    if parser.open_tags:
-        parser.errors.append(
-            "Не закрыты HTML-теги: " + ", ".join(f"<{tag}>" for tag in parser.open_tags)
-        )
-
-    return len(parser.errors) == 0, parser.errors
-
-
-def escape_html(value) -> str:
-    if value is None:
-        return ""
-    return html.escape(str(value), quote=False)
-
-
-async def send_html_message(bot, chat_id, text, **kwargs):
-    valid, errors = validate_html(text)
-    if valid:
-        return await bot.send_message(
-            chat_id,
-            text,
-            parse_mode="HTML",
-            **kwargs
-        )
-
-    print()
-    print("=" * 60)
-    print("❌ ОШИБКА HTML ПЕРЕД ОТПРАВКОЙ")
-    print("=" * 60)
-    for error in errors:
-        print("HTML:", error)
-    print()
-    print("ТЕКСТ С ОШИБКОЙ:")
-    print(text)
-    print("=" * 60)
-
-    safe_text = html.escape(text, quote=False)
-    return await bot.send_message(chat_id, safe_text, **kwargs)
-
-
-# ============================================================
-# СЛУЖЕБНЫЕ СООБЩЕНИЯ
-# ============================================================
-
-def is_internal_message(text: str) -> bool:
-    if not text:
-        return False
-
-    text = text.strip()
-    internal_prefixes = (
-        "ГЕОКОДИРОВАНИЕ:",
-        "GEOAPIFY:",
-        "GEOAPIFY ПОИСК",
-        "ПОСТРОЕНИЕ МАРШРУТА",
-        "ROUTE SERVICE",
-    )
-    for prefix in internal_prefixes:
-        if text.startswith(prefix):
-            return True
-
-    return False
-
-
-# ============================================================
-# КНОПКА ДЛЯ ВОДИТЕЛЯ
-# ============================================================
-
-def drivers_order_keyboard(request_id: int):
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="🟢 БЕРУ ЗАКАЗ",
-        callback_data=f"driver_wants:{request_id}"
-    )
-    return builder.as_markup()
-
-
-# ============================================================
-# ОБНОВЛЕНИЕ КАРТОЧКИ АДМИНИСТРАТОРА
-# ============================================================
-
-async def update_admin_order_card(message: Message, request: dict, phone: str):
-    try:
-        admin_message_id = request.get("admin_message_id") if isinstance(request, dict) else request["admin_message_id"]
-        if not admin_message_id:
-            print("⚠️ У заявки нет admin_message_id")
-            return
-
-        from app.handlers.admin import order_keyboard
-
-        if message.from_user.username:
-            client_name = f"@{message.from_user.username}"
-        else:
-            client_name = message.from_user.first_name or "не указан"
-
-        req_id = request.get("id") if isinstance(request, dict) else request["id"]
-        ai_summary = request.get("ai_summary") if isinstance(request, dict) else request["ai_summary"]
-        raw_text = request.get("raw_text") if isinstance(request, dict) else request["raw_text"]
-
-        updated_admin_text = (
-            f"🚕 <b>НОВАЯ ЗАЯВКА №{req_id}</b>\n\n"
-            f"👤 <b>Клиент:</b> {escape_html(client_name)}\n"
-            f"🆔 <b>ID:</b> {escape_html(message.from_user.id)}\n"
-            f"📞 <b>Телефон:</b> {escape_html(phone)}\n\n"
-            f"{ai_summary}\n"
-            f"📝 <b>Сообщение клиента:</b>\n"
-            f"{escape_html(raw_text)}"
-        )
-
-        valid, errors = validate_html(updated_admin_text)
-        if not valid:
-            print("❌ HTML карточки администратора не прошёл проверку.")
-            return
-
-        await message.bot.edit_message_text(
-            chat_id=get_admin_id(),
-            message_id=admin_message_id,
-            text=updated_admin_text,
-            parse_mode="HTML",
-            reply_markup=order_keyboard(request)
-        )
-        print("✅ КАРТОЧКА АДМИНА ОБНОВЛЕНА ТЕЛЕФОНОМ")
-    except Exception as error:
-        print("❌ ОШИБКА ОБНОВЛЕНИЯ КАРТОЧКИ АДМИНА:", repr(error))
-
-
-# ============================================================
-# СОХРАНЕНИЕ ТЕЛЕФОНА
-# ============================================================
-
-async def process_phone(message: Message, phone: str):
-    phone = phone.strip()
-    print()
-    print("=" * 60)
-    print("ПОЛУЧЕН ТЕЛЕФОН КЛИЕНТА")
-    print("USER ID:", message.from_user.id)
-    print("PHONE:", phone)
-    print("=" * 60)
-
-    try:
-        request = await save_phone(message.from_user.id, phone)
-        if not request:
-            await message.answer(
-                "⚠️ У вас пока нет активной заявки.\n\nСначала отправьте маршрут поездки.",
-                reply_markup=client_menu()
-            )
-            return True
-
-        request_id = request.get("id") if isinstance(request, dict) else request["id"]
-        print("ЗАЯВКА ДЛЯ ТЕЛЕФОНА:", request_id)
-
-        await update_admin_order_card(message, request, phone)
-
-        driver_id = request.get("driver_id") if isinstance(request, dict) else request["driver_id"]
-        if driver_id:
-            try:
-                await send_html_message(
-                    message.bot,
-                    driver_id,
-                    f"📞 <b>Клиент по заказу №{request_id} указал номер:</b> {escape_html(phone)}"
-                )
-                print(f"✅ Телефон отправлен назначенному водителю (ID: {driver_id})")
-            except Exception as driver_err:
-                print(f"⚠️ Ошибка отправки номера водителю: {driver_err}")
-
-        await send_html_message(
-            message.bot,
-            message.chat.id,
-            "📞 <b>Телефон сохранён.</b>\n\nВодитель и администратор оповещены.",
-            reply_markup=client_menu()
-        )
-        print(f"✅ ТЕЛЕФОН СОХРАНЁН ДЛЯ ЗАКАЗА №{request_id}")
-        return True
-    except Exception as error:
-        print("❌ ОШИБКА СОХРАНЕНИЯ ТЕЛЕФОНА:", repr(error))
-        await message.answer(
-            "❌ Не удалось сохранить номер телефона.\nПопробуйте отправить его ещё раз.",
-            reply_markup=client_menu()
-        )
-        return True
-
-
-# ============================================================
-# ВРЕМЯ И ФОРМАТИРОВАНИЕ ДЛЯ MINI APP
-# ============================================================
-
-def get_moscow_now() -> datetime:
-    return datetime.now(ZoneInfo("Europe/Moscow"))
-
-
-def get_mini_app_time_text(data: dict) -> str:
-    selected_time = str(data.get("selected_time", "")).strip().lower()
-    time_type = str(data.get("time_type", "")).strip().lower()
-    time_value = str(data.get("time", "")).strip()
-    date_value = str(data.get("date", "")).strip()
-    raw_text = str(data.get("text", "")).strip().lower()
-
-    if selected_time in {"now", "сейчас"} or time_type in {"now", "сейчас"}:
-        return "сейчас"
-    if selected_time in {"30min", "30", "через 30 минут"} or time_type in {"30min", "30", "через 30 минут"}:
-        return "через 30 минут"
-    if selected_time in {"tomorrow", "завтра"} or time_type in {"tomorrow", "завтра"}:
-        return f"завтра в {time_value}" if time_value else "завтра"
-
-    if "сейчас" in raw_text:
-        return "сейчас"
-    if "через 30 минут" in raw_text:
-        return "через 30 минут"
-
-    if date_value and time_value:
-        return f"{date_value} в {time_value}"
-    if time_value:
-        return time_value
-    if date_value:
-        return date_value
-    return ""
-
-
-def clean_mini_app_route_text(text: str) -> str:
-    if not text:
-        return text
-
-    result = str(text).strip()
-    time_markers = (
-        "через 30 минут",
-        "через час",
-        "через 1 час",
-        "сейчас",
-        "завтра",
-        "послезавтра",
+def driver_want_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="🟢 БЕРУ ЗАКАЗ", callback_data=f"driver_wants:{request_id}")
+        ]]
     )
 
-    for marker in time_markers:
-        result = result.replace(f", {marker}", "")
-        lower_result = result.lower()
-        if lower_result.endswith(f" {marker}"):
-            result = result[:len(result) - len(marker)].rstrip(" ,")
 
-    return result.strip()
-
-
-def build_mini_app_text(data: dict) -> str:
-    from_place = str(data.get("from", "")).strip()
-    to_place = str(data.get("to", "")).strip()
-    passengers = data.get("passengers", 1)
-
-    try:
-        passengers = int(passengers)
-    except (TypeError, ValueError):
-        passengers = 1
-    if passengers < 1:
-        passengers = 1
-
-    time_text = get_mini_app_time_text(data)
-    comment = str(data.get("comment", "")).strip()
-
-    result = f"{from_place} — {to_place}, {passengers} человек"
-    if time_text:
-        result += f", {time_text}"
-    if comment:
-        result += f", {comment}"
-
-    return result.strip()
-
-
-# ============================================================
-# ОБРАБОТКА СООБЩЕНИЯ КЛИЕНТА
-# ============================================================
-
-@router.message(
-    F.chat.id > 0,
-    F.text | F.contact | F.web_app_data
-)
-async def handle_message(message: Message):
-
-    # 1. TELEGRAM КОНТАКТ
-    if message.contact:
-        phone = message.contact.phone_number.strip()
-        print()
-        print("=" * 60)
-        print("ПОЛУЧЕН КОНТАКТ КЛИЕНТА")
-        print("PHONE:", phone)
-        print("=" * 60)
-
-        if message.contact.user_id is not None and message.contact.user_id != message.from_user.id:
-            await message.answer(
-                "⚠️ Пожалуйста, отправьте свой номер телефона.",
-                reply_markup=client_menu()
-            )
-            return
-
-        await process_phone(message, phone)
-        return
-
-    # 2. MINI APP ДАННЫЕ
-    data = None
-    is_mini_app = bool(message.web_app_data)
-
-    if is_mini_app:
-        try:
-            data = json.loads(message.web_app_data.data)
-        except json.JSONDecodeError as error:
-            print("❌ ОШИБКА JSON MINI APP:", repr(error))
-            await message.answer(
-                "❌ Не удалось получить данные заказа из Mini App.",
-                reply_markup=client_menu()
-            )
-            return
-
-        if not isinstance(data, dict):
-            await message.answer("❌ Неверный формат заказа.", reply_markup=client_menu())
-            return
-
-        from_place_input = str(data.get("from", "")).strip()
-        to_place_input = str(data.get("to", "")).strip()
-
-        if not from_place_input or not to_place_input:
-            await message.answer(
-                "⚠️ Укажите адрес отправления и адрес назначения.",
-                reply_markup=client_menu()
-            )
-            return
-
-        text = build_mini_app_text(data)
-    else:
-        text = (message.text or "").strip()
-        if not text:
-            return
-
-    # 3. ЗАЩИТА ОТ СЛУЖЕБНЫХ СООБЩЕНИЙ
-    if is_internal_message(text):
-        return
-
-    print()
-    print("=" * 60)
-    print("ПОЛУЧЕНО СООБЩЕНИЕ ОТ КЛИЕНТА")
-    print("USER ID:", message.from_user.id)
-    print("TEXT:", text)
-    print("=" * 60)
-
-    # 4. ПРОВЕРКА ТЕЛЕФОНА ТЕКСТОМ
-    phone_text = (
-        text.replace(" ", "")
-        .replace("-", "")
-        .replace("(", "")
-        .replace(")", "")
-    )
-    if phone_text.startswith("8") and len(phone_text) == 11:
-        phone_text = "+7" + phone_text[1:]
-
-    if phone_text.startswith("+7") and phone_text[1:].isdigit() and len(phone_text) == 12:
-        await process_phone(message, phone_text)
-        return
-
-    # 5. РАЗБОР ЗАЯВКИ ПАРСЕРОМ
-    parser_text = clean_mini_app_route_text(text) if is_mini_app else text
-
-    try:
-        parsed = await parse_request(parser_text)
-    except Exception as error:
-        print("ОШИБКА ПАРСЕРА:", repr(error))
-        await send_html_message(
-            message.bot,
-            message.chat.id,
-            "❌ <b>Не удалось разобрать заявку.</b>\n\nПример:\nПенза — Воробьевка, 2 человека, завтра",
-            reply_markup=client_menu()
-        )
-        return
-
-    from_place = str(parsed.get("from_place") or "").strip()
-    to_place = str(parsed.get("to_place") or "").strip()
-    from_address = str(parsed.get("from_address") or "").strip()
-    to_address = str(parsed.get("to_address") or "").strip()
-
-    date = parsed.get("date") or "не указана"
-    time = parsed.get("time") or "не указано"
-    passengers = parsed.get("passengers") or "не указано"
-
-    invalid_values = {
-        "", "не определено", "не определен", "не указано",
-        "не указан", "unknown", "none", "null"
-    }
-
-    if from_place.casefold() in invalid_values or to_place.casefold() in invalid_values:
-        await message.answer(
-            "⚠️ Не удалось определить маршрут поездки.\n\n"
-            "Напишите маршрут подробнее, например:\n"
-            "<b>ул. Ленина 5 до вокзала</b> или <b>Пенза — Кузнецк</b>.",
-            parse_mode="HTML",
-            reply_markup=client_menu()
-        )
-        return
-
-    if from_address.casefold() in invalid_values:
-        from_address = from_place
-    if to_address.casefold() in invalid_values:
-        to_address = to_place
-
-    if is_mini_app:
-        from_address = clean_mini_app_route_text(from_address)
-        to_address = clean_mini_app_route_text(to_address)
-        from_place = clean_mini_app_route_text(from_place)
-        to_place = clean_mini_app_route_text(to_place)
-
-        mini_app_time = get_mini_app_time_text(data)
-        if mini_app_time:
-            if mini_app_time in {"сейчас", "через 30 минут"}:
-                date = get_moscow_now().strftime("%Y-%m-%d")
-                time = mini_app_time
-            elif mini_app_time.startswith("завтра"):
-                date = "завтра"
-                time = mini_app_time.split(" в ", 1)[1] if " в " in mini_app_time else "не указано"
-
-    # ========================================================
-    # ОПРЕДЕЛЕНИЕ ТИПА ПОЕЗДКИ (ГОРОД / МЕЖГОРОД)
-    # ========================================================
-    # Список других городов/районов (не входящих в Пензу и ближний пригород)
-    intercity_places = [
-        p for p in KNOWN_PLACES
-        if p not in ("пенза", "заречный")
-    ]
-
-    norm_from = from_address.lower() if from_address else from_place.lower()
-    norm_to = to_address.lower() if to_address else to_place.lower()
-
-    # Проверяем, упоминается ли другой населённый пункт/город
-    from_is_intercity = any(p in norm_from for p in intercity_places)
-    to_is_intercity = any(p in norm_to for p in intercity_places)
-
-    # Если в маршруте явно фигурирует другой город — это межгород.
-    # Если указаны просто улицы или точки внутри Пензы/Спутника/Заречного — это город.
-    is_intercity = from_is_intercity or to_is_intercity
-    city_trip = not is_intercity
-
-    trip_type = "🏙 Городская поездка" if city_trip else "🛣 Межгород"
-
-    # ========================================================
-    # ПОСТРОЕНИЕ МАРШРУТА И РАСЧЁТ ЦЕНЫ
-    # ========================================================
-    route_from = from_address if from_address != "не указан" else from_place
-    route_to = to_address if to_address != "не указан" else to_place
-
-    distance_km = None
-    price = None
-
-    if route_from and route_to:
-        try:
-            distance_km = await get_route_distance(route_from, route_to)
-            if distance_km is not None:
-                price = calculate_price(
-                    distance_km=distance_km,
-                    is_intercity=is_intercity
-                )
-                print(f"РАССТОЯНИЕ: {distance_km} км | ТИП: {trip_type} | ЦЕНА: {price} ₽")
-        except Exception as error:
-            print("ОШИБКА МАРШРУТА:", repr(error))
-
-    # ========================================================
-    # ФОРМИРОВАНИЕ ИТОГА ЗАЯВКИ
-    # ========================================================
-    ai_summary = (
-        f"📍 <b>Откуда:</b> {escape_html(from_place)}\n"
-        f"🏁 <b>Куда:</b> {escape_html(to_place)}\n"
-        f"{trip_type}\n"
-        f"📅 <b>Дата:</b> {escape_html(date)}\n"
-        f"🕐 <b>Время:</b> {escape_html(time)}\n"
-        f"👥 <b>Пассажиров:</b> {escape_html(passengers)}\n"
+def client_cancel_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"client_cancel:{request_id}")
+        ]]
     )
 
-    if distance_km is not None:
-        ai_summary += f"📏 <b>Расстояние:</b> {escape_html(distance_km)} км\n"
 
-    if price is not None:
-        ai_summary += f"💰 <b>Стоимость:</b> {escape_html(format_price(price))}\n"
+# --- ТАЙМАУТ ПОИСКА ---
 
-    # ========================================================
-    # СОЗДАНИЕ ЗАКАЗА В БД
-    # ========================================================
-    try:
-        request_id = await create_request(
-            telegram_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-            raw_text=text,
-            ai_summary=ai_summary,
-            distance_km=distance_km,
-            price=price
+async def order_search_timeout_task(bot: Bot, request_id: int, delay: int = SEARCH_TIMEOUT_SECONDS):
+    await asyncio.sleep(delay)
+
+    req = await get_request(request_id)
+    if req and req.get("status") == "new":
+        client_id = req["telegram_id"]
+        text = (
+            f"⏳ <b>Поиск автомобиля по заказу №{request_id} затянулся</b>\n\n"
+            "К сожалению, в данный момент все ближайшие водители заняты.\n"
+            "Вы хотите продолжить поиск или отменить заказ?"
         )
-    except Exception as error:
-        print("❌ ОШИБКА СОЗДАНИЯ ЗАЯВКИ:", repr(error))
-        await send_html_message(
-            message.bot,
-            message.chat.id,
-            "❌ Не удалось создать заявку.\nПопробуйте отправить её ещё раз.",
-            reply_markup=client_menu()
-        )
-        return
-
-    print("=" * 60)
-    print("ЗАЯВКА СОЗДАНА НОМЕР:", request_id)
-    print("=" * 60)
-
-    client_name = f"@{message.from_user.username}" if message.from_user.username else (message.from_user.first_name or "не указан")
-
-    # ========================================================
-    # КАРТОЧКА АДМИНИСТРАТОРУ
-    # ========================================================
-    admin_text = (
-        f"🚕 <b>НОВАЯ ЗАЯВКА №{request_id}</b>\n\n"
-        f"👤 <b>Клиент:</b> {escape_html(client_name)}\n"
-        f"🆔 <b>ID:</b> {escape_html(message.from_user.id)}\n"
-        f"📞 <b>Телефон:</b> не указан\n\n"
-        f"{ai_summary}\n"
-        f"📝 <b>Сообщение клиента:</b>\n"
-        f"{escape_html(text)}"
-    )
-
-    try:
-        admin_message = await send_html_message(message.bot, get_admin_id(), admin_text)
-        await save_admin_message_id(request_id, admin_message.message_id)
-
-        from app.handlers.admin import order_keyboard
-        req_obj = await get_request(request_id)
-        if req_obj:
-            await admin_message.edit_reply_markup(reply_markup=order_keyboard(req_obj))
-    except Exception as error:
-        print("❌ ОШИБКА КАРТОЧКИ АДМИНУ:", repr(error))
-
-    # ========================================================
-    # ЗАКАЗ В ГРУППУ ВОДИТЕЛЕЙ
-    # ========================================================
-    driver_text = (
-        f"🚕 <b>НОВЫЙ ЗАКАЗ №{request_id}</b>\n\n"
-        f"📍 <b>Откуда:</b> {escape_html(from_place)}\n"
-        f"🏁 <b>Куда:</b> {escape_html(to_place)}\n"
-        f"{trip_type}\n"
-        f"📅 <b>Дата:</b> {escape_html(date)}\n"
-        f"🕐 <b>Время:</b> {escape_html(time)}\n"
-        f"👥 <b>Пассажиров:</b> {escape_html(passengers)}\n"
-    )
-
-    if distance_km is not None:
-        driver_text += f"📏 <b>Расстояние:</b> {escape_html(distance_km)} км\n"
-
-    if price is not None:
-        driver_text += f"💰 <b>Стоимость:</b> {escape_html(format_price(price))}\n"
-
-    try:
-        await send_html_message(
-            message.bot,
-            get_drivers_chat_id(),
-            driver_text,
-            reply_markup=drivers_order_keyboard(request_id)
-        )
-        print("✅ ЗАКАЗ ОТПРАВЛЕН В ГРУППУ ВОДИТЕЛЕЙ")
-    except Exception as error:
-        print("❌ ОШИБКА ОТПРАВКИ ВОДИТЕЛЯМ:", repr(error))
-
-    # ========================================================
-    # ОТВЕТ КЛИЕНТУ
-    # ========================================================
-    client_result = (
-        "✅ <b>Заявка принята</b>\n\n"
-        f"🚕 <b>Номер заказа:</b> №{request_id}\n\n"
-        f"{ai_summary}\n\n"
-        "📞 <b>Теперь отправьте номер телефона.</b>\n"
-        "Нажмите кнопку ниже или отправьте номер обычным сообщением."
-    )
-
-    phone_keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(
-                    text="📞 Отправить номер телефона",
-                    request_contact=True
-                )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Продолжить поиск", callback_data=f"client_retry:{request_id}")],
+                [InlineKeyboardButton(text="❌ Отменить заявку", callback_data=f"client_cancel:{request_id}")]
             ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
+        )
+        try:
+            await bot.send_message(client_id, text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+
+
+# --- ДЕЙСТВИЯ КЛИЕНТА (ОТМЕНА И ПОВТОР ПОИСКА) ---
+
+@router.callback_query(F.data.startswith("client_cancel:"))
+async def client_cancel_order_callback(callback: CallbackQuery):
+    req_id = int(callback.data.split(":")[1])
+    req = await get_request(req_id)
+
+    if not req or req.get("telegram_id") != callback.from_user.id:
+        await callback.answer("❌ Заказ не найден.", show_alert=True)
+        return
+
+    status = req.get("status")
+
+    if status == "arrived":
+        await callback.answer(
+            "⚠️ Автомобиль уже ожидает вас на месте!\n"
+            "Для отмены свяжитесь напрямую с водителем или диспетчером.",
+            show_alert=True
+        )
+        return
+
+    if status in ("done", "cancelled"):
+        await callback.answer("Заказ уже завершён или отменён.", show_alert=True)
+        return
+
+    await cancel_request(req_id)
+
+    drv_msg = driver_order_messages.get(req_id)
+    if drv_msg:
+        try:
+            await callback.bot.edit_message_text(
+                chat_id=drv_msg["chat_id"],
+                message_id=drv_msg["message_id"],
+                text=f"❌ <b>Заказ №{req_id} отменён клиентом.</b>",
+                parse_mode="HTML"
+            )
+            driver_order_messages.pop(req_id, None)
+        except Exception:
+            pass
+
+    driver_id = req.get("driver_id")
+    if driver_id and status == "taken":
+        try:
+            await callback.bot.send_message(
+                chat_id=driver_id,
+                text=f"❌ <b>Клиент отменил поездку по заказу №{req_id}.</b>\nВы освобождены.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+    try:
+        await callback.bot.send_message(
+            chat_id=get_admin_id(),
+            text=f"ℹ️ <b>Клиент самостоятельно отменил заказ №{req_id}</b> (статус был: {status}).",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    try:
+        await callback.message.edit_text(
+            f"❌ <b>Заказ №{req_id} успешно отменён вами.</b>\nЕсли потребуется такси, ждём вас снова!",
+            parse_mode="HTML"
+        )
+    except Exception:
+        await callback.message.answer(f"❌ <b>Заказ №{req_id} отменён.</b>", parse_mode="HTML")
+
+    await callback.answer("Заказ отменён.")
+
+
+@router.callback_query(F.data.startswith("client_retry:"))
+async def client_retry_search_callback(callback: CallbackQuery):
+    req_id = int(callback.data.split(":")[1])
+    req = await get_request(req_id)
+
+    if not req or req.get("status") != "new":
+        await callback.answer("Заказ уже взят водителем или закрыт.", show_alert=True)
+        return
+
+    await callback.answer("🔄 Поиск продлён!")
+    await callback.message.edit_text(
+        f"🔄 <b>Поиск автомобиля по заказу №{req_id} продолжен.</b>\n"
+        "Мы оповестим вас, как только водитель примет заказ.",
+        parse_mode="HTML",
+        reply_markup=client_cancel_keyboard(req_id)
     )
 
-    await send_html_message(
-        message.bot,
-        message.chat.id,
-        client_result,
-        reply_markup=phone_keyboard
+    asyncio.create_task(order_search_timeout_task(callback.bot, req_id, delay=SEARCH_TIMEOUT_SECONDS))
+
+
+# --- ОБРАБОТКА НОВЫХ ЗАКАЗОВ ---
+
+@router.message(F.contact)
+async def handle_contact(message: Message):
+    if not message.contact:
+        return
+
+    phone = message.contact.phone_number
+    telegram_id = message.from_user.id
+    updated_request = await save_phone(telegram_id, phone)
+
+    await message.answer(f"✅ Ваш номер телефона <b>{phone}</b> успешно сохранён!", parse_mode="HTML")
+
+    if updated_request and updated_request.get("admin_message_id"):
+        try:
+            admin_msg_text = (
+                f"🚕 <b>ОБНОВЛЕНИЕ ЗАКАЗА №{updated_request['id']}</b>\n\n"
+                f"{updated_request['ai_summary']}\n\n"
+                f"📱 <b>Телефон клиента добавлен:</b> {phone}\n"
+                f"📊 <b>Статус:</b> {updated_request['status']}"
+            )
+            await message.bot.send_message(get_admin_id(), admin_msg_text, parse_mode="HTML")
+        except Exception:
+            pass
+
+
+@router.message(F.text | F.web_app_data)
+async def handle_message(message: Message):
+    if message.chat.id == get_drivers_chat_id():
+        return
+
+    user_id = message.from_user.id
+    ban_info = await get_ban_info(user_id)
+    if ban_info:
+        reason = ban_info.get("reason", "Нарушение правил сервиса")
+        await message.answer(
+            f"⛔ <b>Ваш доступ к сервису такси ограничен.</b>\n\n<b>Причина:</b> {reason}\nЕсли произошла ошибка, свяжитесь с поддержкой.",
+            parse_mode="HTML"
+        )
+        return
+
+    raw_text = ""
+    order_data = {}
+
+    if message.web_app_data:
+        try:
+            order_data = json.loads(message.web_app_data.data)
+            raw_text = order_data.get("text") or ""
+        except Exception:
+            raw_text = message.web_app_data.data
+    else:
+        raw_text = message.text or ""
+
+    if raw_text.startswith("/") or raw_text in [
+        "📋 Активные заказы", "📋 Последняя заявка", "📊 Статистика за сегодня",
+        "🚗 Водители и авто", "📥 Выгрузить отчёт", "📚 История заказов",
+        "⚙️ Управление тарифами", "ℹ️ Как это работает", "💼 Мой баланс"
+    ]:
+        return
+
+    parsed = parse_order_text(raw_text)
+    from_address = order_data.get("from") or parsed.get("from_address")
+    to_address = order_data.get("to") or parsed.get("to_address")
+
+    if not from_address or not to_address:
+        await message.answer(
+            "⚠️ <b>Не удалось определить маршрут поездки.</b>\n\n"
+            "Напишите подробнее, например:\n"
+            "<i>Терновского 160 — Пушкина 3, 1 человек, сейчас</i>\n"
+            "или воспользуйтесь кнопкой <b>«🚖 Заказать через приложение»</b>.",
+            parse_mode="HTML"
+        )
+        return
+
+    distance_km = await get_route_distance(from_address, to_address)
+    has_child_chair = order_data.get("has_child_chair") or parsed.get("has_child_chair", False)
+    price_info = calculate_price(distance_km=distance_km, has_child_chair=has_child_chair) if distance_km else None
+
+    if price_info:
+        settings = await get_tariff_settings()
+        if price_info["is_city"] and not settings["city_enabled"]:
+            await message.answer("⚠️ Городские поездки временно приостановлены диспетчером.")
+            return
+        if not price_info["is_city"] and not settings["intercity_enabled"]:
+            await message.answer("⚠️ Междугородние поездки временно приостановлены диспетчером.")
+            return
+
+    saved_phone = await get_user_phone(message.from_user.id)
+    phone_display = saved_phone or "не указан"
+    passengers = order_data.get("passengers") or parsed.get("passengers", 1)
+    time_str = order_data.get("time") or parsed.get("time") or "сейчас"
+    comment = order_data.get("comment") or ""
+
+    summary = (
+        f"📍 <b>Откуда:</b> {from_address}\n"
+        f"🏁 <b>Куда:</b> {to_address}\n"
+        f"👥 <b>Пассажиров:</b> {passengers}\n"
+        f"🕐 <b>Время подачи:</b> {time_str}\n"
     )
-    print("=" * 60)
-    print("ОБРАБОТКА ЗАЯВКИ ЗАВЕРШЕНА:", request_id)
-    print("=" * 60)
+    if has_child_chair:
+        summary += "👶 <b>Детское кресло:</b> Да\n"
+    if comment:
+        summary += f"💬 <b>Пожелания:</b> {comment}\n"
+
+    if distance_km and price_info:
+        summary += f"📏 <b>Расстояние:</b> {distance_km} км\n💰 <b>Стоимость:</b> {price_info['price']} ₽"
+    else:
+        summary += "💰 <b>Стоимость:</b> рассчитывается диспетчером"
+
+    request_id = await create_request(
+        telegram_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        raw_text=raw_text,
+        ai_summary=summary,
+        distance_km=distance_km,
+        price=price_info["price"] if price_info else None,
+        phone=saved_phone
+    )
+
+    client_text = (
+        f"🚕 <b>Заказ №{request_id} принят!</b>\n\n{summary}\n\n"
+        "Ищем свободного водителя. Мы уведомим вас, когда машина будет назначена."
+    )
+    await message.answer(client_text, parse_mode="HTML", reply_markup=client_cancel_keyboard(request_id))
+
+    asyncio.create_task(order_search_timeout_task(message.bot, request_id, delay=SEARCH_TIMEOUT_SECONDS))
+
+    drivers_chat_id = get_drivers_chat_id()
+    if drivers_chat_id:
+        driver_card = f"🚕 <b>НОВЫЙ ЗАКАЗ №{request_id}</b>\n\n{summary}\n\nНажмите кнопку ниже, чтобы взять заказ:"
+        try:
+            drv_msg = await message.bot.send_message(
+                chat_id=drivers_chat_id,
+                text=driver_card,
+                parse_mode="HTML",
+                reply_markup=driver_want_keyboard(request_id)
+            )
+            driver_order_messages[request_id] = {
+                "chat_id": drivers_chat_id,
+                "message_id": drv_msg.message_id
+            }
+        except Exception as e:
+            print("Ошибка отправки водителям:", e)
+
+    try:
+        from app.handlers.admin import order_keyboard
+        req_dict = {
+            "id": request_id,
+            "telegram_id": message.from_user.id,
+            "first_name": message.from_user.first_name,
+            "username": message.from_user.username,
+            "phone": saved_phone,
+            "ai_summary": summary,
+            "raw_text": raw_text,
+            "status": "new"
+        }
+        adm_msg = await message.bot.send_message(
+            chat_id=get_admin_id(),
+            text=(
+                f"🔔 <b>НОВАЯ ЗАЯВКА №{request_id}</b>\n\n"
+                f"👤 Клиент: {message.from_user.first_name} (ID: <code>{message.from_user.id}</code>)\n"
+                f"📱 Телефон: {phone_display}\n\n{summary}"
+            ),
+            parse_mode="HTML",
+            reply_markup=order_keyboard(req_dict)
+        )
+        await save_admin_message_id(request_id, adm_msg.message_id)
+    except Exception as e:
+        print("Ошибка оповещения админа:", e)

@@ -10,10 +10,12 @@ CITY_PRICE_PER_KM = 35  # Стоимость за 1 км сверх включё
 MIN_CITY_PRICE = 300  # Минимальная цена по городу
 
 # Межгород:
-# Оплата за км + минимальный порог
 INTERCITY_BASE_PRICE = 250  # Подача на межгород
 INTERCITY_PRICE_PER_KM = 25  # Стоимость за 1 км
 MIN_INTERCITY_PRICE = 500  # Минимальная цена межгорода
+
+# Дополнительные услуги (наценка только за детское кресло)
+CHILD_CHAIR_PRICE = 100  # Доплата за детское кресло
 
 
 # =====================================
@@ -22,7 +24,8 @@ MIN_INTERCITY_PRICE = 500  # Минимальная цена межгорода
 
 def calculate_price(
         distance_km: float,
-        is_intercity: bool = False
+        is_intercity: bool = False,
+        has_child_chair: bool = False
 ) -> int:
     try:
         distance_km = float(distance_km)
@@ -30,11 +33,9 @@ def calculate_price(
         distance_km = 0.0
 
     if is_intercity:
-        # Межгород: базовая подача + ставка за километр
         price = INTERCITY_BASE_PRICE + (distance_km * INTERCITY_PRICE_PER_KM)
         price = max(price, MIN_INTERCITY_PRICE)
     else:
-        # Город: если поездка больше включённого расстояния, начисляем за каждый км
         if distance_km <= CITY_INCLUDED_KM:
             price = CITY_BASE_PRICE
         else:
@@ -42,6 +43,10 @@ def calculate_price(
             price = CITY_BASE_PRICE + (extra_km * CITY_PRICE_PER_KM)
 
         price = max(price, MIN_CITY_PRICE)
+
+    # Наценка начисляется только если выбрано детское кресло
+    if has_child_chair:
+        price += CHILD_CHAIR_PRICE
 
     return round(price)
 

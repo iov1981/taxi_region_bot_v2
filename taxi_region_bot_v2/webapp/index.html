@@ -2,20 +2,11 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
-    >
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#229ed9">
-
     <title>Такси Пензенской области</title>
 
-    <!-- Относительный путь к стилям для GitHub Pages -->
     <link rel="stylesheet" href="style.css">
-
-    <!-- Официальный скрипт Telegram WebApp -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 
@@ -25,67 +16,47 @@
 
     <!-- Шапка -->
     <div class="header">
-
-        <div class="logo">
-            🚕
-        </div>
-
+        <div class="logo">🚕</div>
         <div class="header-text">
             <h1>Такси</h1>
             <p>Пензенская область</p>
         </div>
-
     </div>
-
 
     <!-- Маршрут -->
     <div class="card route-card">
-
         <div class="section-title">
             <span>📍</span>
             <span>Маршрут</span>
         </div>
 
-
-        <!-- Откуда -->
+        <!-- Откуда с кнопкой геолокации -->
         <div class="field-wrapper">
-
-            <label for="from">
-                Откуда
-            </label>
-
-            <div class="input-with-button">
-
+            <label for="from">Откуда</label>
+            <div class="input-with-button" style="display: flex; gap: 8px; align-items: center;">
                 <input
                     id="from"
                     type="text"
-                    placeholder="Например: Пенза, Кирова, 10"
+                    placeholder="Например: Терновского 162"
                     autocomplete="street-address"
+                    style="flex: 1;"
                 >
-
                 <button
                     id="location-button"
                     class="icon-button"
                     type="button"
                     aria-label="Определить местоположение"
                     title="Моё местоположение"
+                    style="padding: 0 14px; height: 46px; border-radius: 12px; border: 1px solid #ccc; background: var(--tg-theme-secondary-bg-color, #f0f2f5); cursor: pointer; font-size: 18px;"
                 >
                     🎯
                 </button>
-
             </div>
-
-            <div
-                id="location-status"
-                class="field-hint hidden"
-            ></div>
-
+            <div id="location-status" class="field-hint" style="font-size: 12px; margin-top: 4px; color: var(--tg-theme-hint-color, #888); display: none;"></div>
         </div>
-
 
         <!-- Поменять местами -->
         <div class="swap-wrapper">
-
             <button
                 id="swap-route"
                 class="swap-button"
@@ -95,350 +66,124 @@
             >
                 ⇅
             </button>
-
         </div>
-
 
         <!-- Куда -->
         <div class="field-wrapper">
-
-            <label for="to">
-                Куда
-            </label>
-
+            <label for="to">Куда</label>
             <input
                 id="to"
                 type="text"
-                placeholder="Например: Саратов, Московская, 25"
+                placeholder="Например: Проспект Строителей 37"
                 autocomplete="street-address"
             >
-
         </div>
-
     </div>
-
 
     <!-- Когда -->
     <div class="card">
-
         <div class="section-title">
             <span>🕐</span>
             <span>Когда</span>
         </div>
 
-
         <div class="quick-time">
-
-            <button
-                type="button"
-                class="quick-time-button active"
-                data-time="now"
-            >
-                Сейчас
-            </button>
-
-            <button
-                type="button"
-                class="quick-time-button"
-                data-time="30min"
-            >
-                Через 30 минут
-            </button>
-
-            <button
-                type="button"
-                class="quick-time-button"
-                data-time="tomorrow"
-            >
-                Завтра
-            </button>
-
+            <button type="button" class="quick-time-button active" data-time="now">Сейчас</button>
+            <button type="button" class="quick-time-button" data-time="30min">Через 30 минут</button>
+            <button type="button" class="quick-time-button" data-time="tomorrow">Завтра</button>
         </div>
 
+        <label for="date">Дата</label>
+        <input id="date" type="date">
 
-        <label for="date">
-            Дата
-        </label>
-
-        <input
-            id="date"
-            type="date"
-        >
-
-
-        <label for="time">
-            Время
-        </label>
-
-        <input
-            id="time"
-            type="time"
-        >
-
+        <label for="time">Время</label>
+        <input id="time" type="time">
     </div>
-
 
     <!-- Пассажиры -->
     <div class="card">
-
         <div class="section-title">
             <span>👤</span>
             <span>Пассажиры</span>
         </div>
 
         <div class="passengers">
-
-            <button
-                id="minus"
-                type="button"
-                aria-label="Уменьшить количество пассажиров"
-            >
-                −
-            </button>
-
+            <button id="minus" type="button" aria-label="Уменьшить">−</button>
             <div class="passenger-count">
                 <span id="passengers">1</span>
                 <small>чел.</small>
             </div>
-
-            <button
-                id="plus"
-                type="button"
-                aria-label="Увеличить количество пассажиров"
-            >
-                +
-            </button>
-
+            <button id="plus" type="button" aria-label="Увеличить">+</button>
         </div>
-
     </div>
-
 
     <!-- Тариф -->
     <div class="card">
-
         <div class="section-title">
             <span>🚗</span>
             <span>Тариф</span>
         </div>
-
         <div class="economy-card">
-
-            <div class="economy-icon">
-                🚗
-            </div>
-
+            <div class="economy-icon">🚗</div>
             <div class="economy-info">
-                <strong>Эконом</strong>
-                <span>Обычный автомобиль</span>
+                <strong>Стандарт</strong>
+                <span>Город и область</span>
             </div>
-
-            <div class="economy-check">
-                ✓
-            </div>
-
+            <div class="economy-check">✓</div>
         </div>
-
     </div>
-
 
     <!-- Оплата -->
     <div class="card">
-
         <div class="section-title">
             <span>💳</span>
             <span>Способ оплаты</span>
         </div>
 
         <div class="payment-list">
-
-            <button
-                type="button"
-                class="payment-option active"
-                data-payment="cash"
-            >
+            <button type="button" class="payment-option active" data-payment="cash">
                 <span>💵</span>
                 <span>Наличные</span>
             </button>
-
-
-            <button
-                type="button"
-                class="payment-option"
-                data-payment="card"
-            >
+            <button type="button" class="payment-option" data-payment="card">
                 <span>💳</span>
                 <span>Карта</span>
             </button>
-
-
-            <button
-                type="button"
-                class="payment-option"
-                data-payment="sbp"
-            >
+            <button type="button" class="payment-option" data-payment="sbp">
                 <span>📱</span>
                 <span>СБП</span>
             </button>
-
         </div>
-
     </div>
 
-
-    <!-- Карта -->
-    <div class="card map-card">
-
-        <div class="section-title">
-            <span>🗺️</span>
-            <span>Маршрут на карте</span>
-        </div>
-
-        <div
-            id="map-preview"
-            class="map-preview"
-        >
-
-            <div class="map-placeholder">
-
-                <div class="map-road road-1"></div>
-                <div class="map-road road-2"></div>
-                <div class="map-road road-3"></div>
-
-                <div
-                    id="map-from-point"
-                    class="map-point map-from"
-                >
-                    📍
-                </div>
-
-                <div
-                    id="map-to-point"
-                    class="map-point map-to"
-                >
-                    🏁
-                </div>
-
-                <div class="map-route-line"></div>
-
-                <div class="map-label map-from-label">
-                    Откуда
-                </div>
-
-                <div class="map-label map-to-label">
-                    Куда
-                </div>
-
-            </div>
-
-        </div>
-
-        <div
-            id="map-status"
-            class="map-status"
-        >
-            Введите адреса, чтобы увидеть маршрут
-        </div>
-
-    </div>
-
-
-    <!-- Комментарий -->
+    <!-- Дополнительные опции и комментарий -->
     <div class="card">
-
         <div class="section-title">
-            <span>💬</span>
-            <span>Комментарий</span>
+            <span>✨</span>
+            <span>Опции и пожелания</span>
         </div>
-
 
         <div class="comment-tags">
-
-            <button
-                type="button"
-                class="tag"
-                data-comment="Позвонить мне"
-            >
-                📞 Позвонить мне
-            </button>
-
-            <button
-                type="button"
-                class="tag"
-                data-comment="Есть багаж"
-            >
-                🧳 Багаж
-            </button>
-
-            <button
-                type="button"
-                class="tag"
-                data-comment="Нужно детское кресло"
-            >
-                👶 Детское кресло
-            </button>
-
-            <button
-                type="button"
-                class="tag"
-                data-comment="Без животных"
-            >
-                🐕 Без животных
-            </button>
-
+            <button type="button" class="tag" data-comment="Нужно детское кресло">👶 Детское кресло (+100 ₽)</button>
+            <button type="button" class="tag" data-comment="Есть багаж">🧳 Багаж</button>
+            <button type="button" class="tag" data-comment="Без животных">🐕 Без животных</button>
+            <button type="button" class="tag" data-comment="Позвонить мне">📞 Позвонить мне</button>
         </div>
 
-
-        <textarea
-            id="comment"
-            placeholder="Дополнительная информация"
-        ></textarea>
-
+        <textarea id="comment" placeholder="Дополнительная информация (подъезд, багаж и т.д.)"></textarea>
     </div>
 
-
-    <!-- Стоимость -->
-    <div class="price-card">
-
-        <div class="price-label">
-            Предварительная стоимость
-        </div>
-
-        <div
-            id="price"
-            class="price-value"
-        >
-            —
-        </div>
-
-        <div
-            id="price-status"
-            class="price-status"
-        >
-            Введите маршрут для расчёта
-        </div>
-
-    </div>
-
-
-    <!-- Заказать -->
-    <button
-        id="order"
-        class="order-button"
-        type="button"
-        disabled
-    >
+    <!-- Кнопка заказа -->
+    <button id="order" class="order-button" type="button" disabled>
         🚕 Заказать
     </button>
 
-
     <div class="bottom-info">
-        Стоимость может быть уточнена после подтверждения заявки
+        Стоимость рассчитывается автоматически по таксометру
     </div>
 
 </div>
 
-<!-- Относительный путь к скрипту для GitHub Pages -->
 <script src="app.js"></script>
 
 </body>

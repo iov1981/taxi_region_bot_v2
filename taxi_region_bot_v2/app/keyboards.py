@@ -4,105 +4,56 @@ from aiogram.types import (
     WebAppInfo
 )
 
-import os
+MINI_APP_URL = "https://iov1981.github.io/taxi-app/"
 
 
-# ============================================================
-# URL MINI APP
-# ============================================================
-
-WEBAPP_URL = os.getenv(
-    "WEBAPP_URL",
-    "https://taxi-region-bot-v2.fadehost.app/webapp/",
-).strip()
-
-
-# ============================================================
-# МЕНЮ КЛИЕНТА
-# ============================================================
-
-def client_menu():
-
-    keyboard = []
-
-    # --------------------------------------------------------
-    # MINI APP
-    # --------------------------------------------------------
-
-    if WEBAPP_URL:
-
-        keyboard.append(
-            [
-                KeyboardButton(
-                    text="🚕 Заказать через приложение",
-                    web_app=WebAppInfo(
-                        url=WEBAPP_URL
-                    )
-                )
-            ]
-        )
-
-    # --------------------------------------------------------
-    # ТЕЛЕФОН
-    # --------------------------------------------------------
-
-    keyboard.append(
+def client_menu() -> ReplyKeyboardMarkup:
+    keyboard = [
         [
             KeyboardButton(
-                text="📞 Отправить телефон",
-                request_contact=True
+                text="🚖 Заказать через приложение",
+                web_app=WebAppInfo(url=MINI_APP_URL)
             )
-        ]
-    )
-
-    # --------------------------------------------------------
-    # ПОМОЩЬ
-    # --------------------------------------------------------
-
-    keyboard.append(
+        ],
         [
-            KeyboardButton(
-                text="ℹ️ Как это работает"
-            )
+            KeyboardButton(text="💼 Мой баланс"),
+            KeyboardButton(text="ℹ️ Как это работает")
         ]
-    )
-
+    ]
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
-        resize_keyboard=True
+        resize_keyboard=True,
+        persistent=True
     )
 
 
-# ============================================================
-# МЕНЮ АДМИНИСТРАТОРА
-# ============================================================
-
-def admin_menu():
-
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(
-                    text="📋 Последняя заявка"
-                )
-            ],
-            [
-                KeyboardButton(
-                    text="📋 Активные заказы"
-                )
-            ],
-            [
-                KeyboardButton(
-                    text="📚 История заказов"
-                )
-            ],
-            [
-                KeyboardButton(
-                    text="⚙️ Управление тарифами"
-                )
-            ]
+def admin_menu() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [
+            KeyboardButton(
+                text="🚖 Заказать через приложение",
+                web_app=WebAppInfo(url=MINI_APP_URL)
+            )
         ],
-        resize_keyboard=True
+        [
+            KeyboardButton(text="📋 Активные заказы"),
+            KeyboardButton(text="📋 Последняя заявка")
+        ],
+        [
+            KeyboardButton(text="📊 Статистика за сегодня"),
+            KeyboardButton(text="💼 Мой баланс")
+        ],
+        [
+            KeyboardButton(text="🚗 Водители и авто"),
+            KeyboardButton(text="📥 Выгрузить отчёт")
+        ],
+        [
+            KeyboardButton(text="📚 История заказов"),
+            KeyboardButton(text="⚙️ Управление тарифами")
+        ]
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        persistent=True
     )
-
-    return keyboard

@@ -1,12 +1,23 @@
+# Секреты и токены
 .env
+
+# База данных
+*.db
+taxi.db
+
+# Виртуальное окружение
 .venv/
 venv/
+env/
+
+# Кэш Python
 __pycache__/
 *.pyc
-*.db
-*.sqlite3
-taxi
-test_route.db
+
+# IDE
 .idea/
 .vscode/
-test_route
+
+# Отчёты и бэкапы
+*.csv
+backups/
