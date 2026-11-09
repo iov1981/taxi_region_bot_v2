@@ -25,6 +25,11 @@ const commentTags = document.querySelectorAll(".tag");
 const commentInput = document.getElementById("comment");
 const orderButton = document.getElementById("order");
 
+// Элементы блока стоимости
+const estimateCard = document.getElementById("estimate-card");
+const estimateDistance = document.getElementById("estimate-distance");
+const estimatePrice = document.getElementById("estimate-price");
+
 // Состояние
 let passengers = 1;
 let selectedTime = "now";
@@ -32,8 +37,80 @@ let selectedPayment = "cash";
 let sendingOrder = false;
 
 // Бесплатный ключ Geoapify для обратного геокодирования
-// Замените на ваш собственный ключ из файла .env бота при необходимости
 const GEOAPIFY_API_KEY = "f5f59fa0fcfb46ac911a300d8cfbdff6";
+
+// ==========================================
+// РАСЧЁТ ОРИЕНТИРОВОЧНОЙ СТОИМОСТИ
+// ==========================================
+
+function calculatePrice(distanceKm, hasChildChair = false) {
+    if (!distanceKm || distanceKm <= 0) return null;
+
+    let base = 0;
+    const isCity = distanceKm <= 15.0;
+
+    if (isCity) {
+        if (distanceKm <= 2.0) {
+            base = 200;
+        } else {
+            base = 200 + ((distanceKm - 2.0) * 35);
+        }
+    } else {
+        base = Math.max(distanceKm * 30, 300);
+    }
+
+    if (hasChildChair) {
+        base += 100;
+    }
+
+    return {
+        distanceKm: Math.round(distanceKm * 10) / 10,
+        price: Math.round(base)
+    };
+}
+
+function estimateApproxDistance(fromText, toText) {
+    if (!fromText || !toText) return null;
+    const cleanFrom = fromText.toLowerCase().trim();
+    const cleanTo = toText.toLowerCase().trim();
+
+    // Города и районные центры области
+    const towns = [
+        "кузнецк", "заречный", "каменка", "сердобск", "нижний ломов",
+        "никольск", "белинский", "городище", "мокшан", "лунино",
+        "земетчино", "бессоновка", "пыркино", "засечное", "спутник"
+    ];
+
+    const isIntercity = towns.some(t => cleanFrom.includes(t) || cleanTo.includes(t));
+    if (isIntercity) {
+        return 45.0; // Средняя оценка дистанции для поездок по области
+    }
+
+    // Средний километраж городской поездки по Пензе
+    return 5.5;
+}
+
+function updateEstimateDisplay() {
+    if (!fromInput || !toInput || !estimateCard) return;
+
+    const fromVal = fromInput.value.trim();
+    const toVal = toInput.value.trim();
+
+    if (fromVal.length >= 3 && toVal.length >= 3) {
+        const hasChildChair = commentInput.value.toLowerCase().includes("кресл");
+        const dist = estimateApproxDistance(fromVal, toVal);
+        const res = calculatePrice(dist, hasChildChair);
+
+        if (res) {
+            if (estimateDistance) estimateDistance.textContent = `Дистанция: ~${res.distanceKm} км`;
+            if (estimatePrice) estimatePrice.textContent = `~${res.price} ₽`;
+            estimateCard.style.display = "block";
+            return;
+        }
+    }
+
+    estimateCard.style.display = "none";
+}
 
 // ==========================================
 // ГЕОЛОКАЦИЯ (HTML5 GPS + Geoapify Reverse)
@@ -85,6 +162,7 @@ async function getLocation() {
                 locationBtn.innerText = "🎯";
                 locationBtn.disabled = false;
                 updateOrderButton();
+                updateEstimateDisplay();
             }
         },
         (error) => {
@@ -125,6 +203,7 @@ if (swapBtn) {
         fromInput.value = toInput.value;
         toInput.value = temp;
         updateOrderButton();
+        updateEstimateDisplay();
     });
 }
 
@@ -207,6 +286,7 @@ commentTags.forEach((tag) => {
     tag.addEventListener("click", () => {
         tag.classList.toggle("active");
         updateCommentFromTags();
+        updateEstimateDisplay(); // Пересчитываем цену при клике на детское кресло
     });
 });
 
@@ -243,8 +323,15 @@ function updateOrderButton() {
     orderButton.disabled = !isFormValid() || sendingOrder;
 }
 
-fromInput.addEventListener("input", updateOrderButton);
-toInput.addEventListener("input", updateOrderButton);
+fromInput.addEventListener("input", () => {
+    updateOrderButton();
+    updateEstimateDisplay();
+});
+
+toInput.addEventListener("input", () => {
+    updateOrderButton();
+    updateEstimateDisplay();
+});
 
 // ==========================================
 // ФОРМИРОВАНИЕ ТЕКСТА ЗАКАЗА ДЛЯ БОТА
@@ -318,3 +405,4 @@ orderButton.addEventListener("click", sendOrderToBot);
 // Начальное состояние
 setNow();
 updateOrderButton();
+updateEstimateDisplay();
