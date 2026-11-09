@@ -1,190 +1,104 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#229ed9">
-    <title>Такси Пензенской области</title>
+// ============================================================
+// ОЦЕНКА РАССТОЯНИЯ И РАСЧЁТ СТОИМОСТИ В MINI APP
+// ============================================================
 
-    <link rel="stylesheet" href="style.css">
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-</head>
+// Функция расчёта цены по тарифной сетке бота
+function calculatePrice(distanceKm, hasChildChair = false) {
+    if (!distanceKm || distanceKm <= 0) return null;
 
-<body>
+    let base = 0;
+    const isCity = distanceKm <= 15.0;
 
-<div class="container">
+    if (isCity) {
+        if (distanceKm <= 2.0) {
+            base = 200;
+        } else {
+            base = 200 + ((distanceKm - 2.0) * 35);
+        }
+    } else {
+        base = Math.max(distanceKm * 30, 300);
+    }
 
-    <!-- Шапка -->
-    <div class="header">
-        <div class="logo">🚕</div>
-        <div class="header-text">
-            <h1>Такси</h1>
-            <p>Пензенская область</p>
-        </div>
-    </div>
+    if (hasChildChair) {
+        base += 100;
+    }
 
-    <!-- Маршрут -->
-    <div class="card route-card">
-        <div class="section-title">
-            <span>📍</span>
-            <span>Маршрут</span>
-        </div>
+    return {
+        distanceKm: Math.round(distanceKm * 10) / 10,
+        price: Math.round(base)
+    };
+}
 
-        <!-- Откуда с кнопкой геолокации -->
-        <div class="field-wrapper">
-            <label for="from">Откуда</label>
-            <div class="input-with-button" style="display: flex; gap: 8px; align-items: center;">
-                <input
-                    id="from"
-                    type="text"
-                    placeholder="Например: Терновского 162"
-                    autocomplete="street-address"
-                    style="flex: 1;"
-                >
-                <button
-                    id="location-button"
-                    class="icon-button"
-                    type="button"
-                    aria-label="Определить местоположение"
-                    title="Моё местоположение"
-                    style="padding: 0 14px; height: 46px; border-radius: 12px; border: 1px solid #ccc; background: var(--tg-theme-secondary-bg-color, #f0f2f5); cursor: pointer; font-size: 18px;"
-                >
-                    🎯
-                </button>
-            </div>
-            <div id="location-status" class="field-hint" style="font-size: 12px; margin-top: 4px; color: var(--tg-theme-hint-color, #888); display: none;"></div>
-        </div>
+// Приблизительная оценка дистанции по тексту маршрута
+function estimateApproxDistance(fromText, toText) {
+    if (!fromText || !toText) return null;
+    const cleanFrom = fromText.toLowerCase().trim();
+    const cleanTo = toText.toLowerCase().trim();
 
-        <!-- Поменять местами -->
-        <div class="swap-wrapper">
-            <button
-                id="swap-route"
-                class="swap-button"
-                type="button"
-                aria-label="Поменять местами"
-                title="Поменять местами"
-            >
-                ⇅
-            </button>
-        </div>
+    // Города области
+    const towns = ["кузнецк", "заречный", "каменка", "сердобск", "нижний ломов", "никольск", "белинский", "городище", "мокшан"];
+    const isIntercity = towns.some(t => cleanFrom.includes(t) || cleanTo.includes(t));
 
-        <!-- Куда -->
-        <div class="field-wrapper">
-            <label for="to">Куда</label>
-            <input
-                id="to"
-                type="text"
-                placeholder="Например: Проспект Строителей 37"
-                autocomplete="street-address"
-            >
-        </div>
-    </div>
+    if (isIntercity) {
+        return 45.0; // Средняя ориентировочная дистанция для межгорода
+    }
 
-    <!-- Когда -->
-    <div class="card">
-        <div class="section-title">
-            <span>🕐</span>
-            <span>Когда</span>
-        </div>
+    // Если обычная поездка по Пензе (в среднем 4-7 км)
+    return 5.5;
+}
 
-        <div class="quick-time">
-            <button type="button" class="quick-time-button active" data-time="now">Сейчас</button>
-            <button type="button" class="quick-time-button" data-time="30min">Через 30 минут</button>
-            <button type="button" class="quick-time-button" data-time="tomorrow">Завтра</button>
-        </div>
+// Обновление плашки стоимости на экране
+function updateEstimateDisplay() {
+    const fromInput = document.getElementById("from");
+    const toInput = document.getElementById("to");
+    const estimateCard = document.getElementById("estimate-card");
+    const estimateDistance = document.getElementById("estimate-distance");
+    const estimatePrice = document.getElementById("estimate-price");
 
-        <label for="date">Дата</label>
-        <input id="date" type="date">
+    if (!fromInput || !toInput || !estimateCard) return;
 
-        <label for="time">Время</label>
-        <input id="time" type="time">
-    </div>
+    const fromVal = fromInput.value.trim();
+    const toVal = toInput.value.trim();
 
-    <!-- Пассажиры -->
-    <div class="card">
-        <div class="section-title">
-            <span>👤</span>
-            <span>Пассажиры</span>
-        </div>
+    // Показываем блок, только если оба адреса заполнены (минимум от 3 символов)
+    if (fromVal.length >= 3 && toVal.length >= 3) {
+        // Проверяем, нажата ли кнопка детского кресла
+        const childTag = document.querySelector('.tag[data-comment="Нужно детское кресло"]');
+        const hasChildChair = childTag ? childTag.classList.contains("active") : false;
 
-        <div class="passengers">
-            <button id="minus" type="button" aria-label="Уменьшить">−</button>
-            <div class="passenger-count">
-                <span id="passengers">1</span>
-                <small>чел.</small>
-            </div>
-            <button id="plus" type="button" aria-label="Увеличить">+</button>
-        </div>
-    </div>
+        const dist = estimateApproxDistance(fromVal, toVal);
+        const res = calculatePrice(dist, hasChildChair);
 
-    <!-- Тариф -->
-    <div class="card">
-        <div class="section-title">
-            <span>🚗</span>
-            <span>Тариф</span>
-        </div>
-        <div class="economy-card">
-            <div class="economy-icon">🚗</div>
-            <div class="economy-info">
-                <strong>Стандарт</strong>
-                <span>Город и область</span>
-            </div>
-            <div class="economy-check">✓</div>
-        </div>
-    </div>
+        if (res) {
+            estimateDistance.textContent = `Дистанция: ~${res.distanceKm} км`;
+            estimatePrice.textContent = `~${res.price} ₽`;
+            estimateCard.style.display = "block";
+            return;
+        }
+    }
 
-    <!-- Оплата -->
-    <div class="card">
-        <div class="section-title">
-            <span>💳</span>
-            <span>Способ оплаты</span>
-        </div>
+    estimateCard.style.display = "none";
+}
 
-        <div class="payment-list">
-            <button type="button" class="payment-option active" data-payment="cash">
-                <span>💵</span>
-                <span>Наличные</span>
-            </button>
-            <button type="button" class="payment-option" data-payment="card">
-                <span>💳</span>
-                <span>Карта</span>
-            </button>
-            <button type="button" class="payment-option" data-payment="sbp">
-                <span>📱</span>
-                <span>СБП</span>
-            </button>
-        </div>
-    </div>
+// Слушатели событий ввода адресов и клика по тегам
+document.addEventListener("DOMContentLoaded", () => {
+    const fromInput = document.getElementById("from");
+    const toInput = document.getElementById("to");
+    const swapBtn = document.getElementById("swap-route");
 
-    <!-- Дополнительные опции и комментарий -->
-    <div class="card">
-        <div class="section-title">
-            <span>✨</span>
-            <span>Опции и пожелания</span>
-        </div>
+    if (fromInput) fromInput.addEventListener("input", updateEstimateDisplay);
+    if (toInput) toInput.addEventListener("input", updateEstimateDisplay);
 
-        <div class="comment-tags">
-            <button type="button" class="tag" data-comment="Нужно детское кресло">👶 Детское кресло (+100 ₽)</button>
-            <button type="button" class="tag" data-comment="Есть багаж">🧳 Багаж</button>
-            <button type="button" class="tag" data-comment="Без животных">🐕 Без животных</button>
-            <button type="button" class="tag" data-comment="Позвонить мне">📞 Позвонить мне</button>
-        </div>
+    if (swapBtn) {
+        swapBtn.addEventListener("click", () => {
+            setTimeout(updateEstimateDisplay, 50);
+        });
+    }
 
-        <textarea id="comment" placeholder="Дополнительная информация (подъезд, багаж и т.д.)"></textarea>
-    </div>
-
-    <!-- Кнопка заказа -->
-    <button id="order" class="order-button" type="button" disabled>
-        🚕 Заказать
-    </button>
-
-    <div class="bottom-info">
-        Стоимость рассчитывается автоматически по таксометру
-    </div>
-
-</div>
-
-<script src="app.js"></script>
-
-</body>
-</html>
+    // При клике на любые теги (включая детское кресло) пересчитывать цену
+    document.querySelectorAll(".tag").forEach(tag => {
+        tag.addEventListener("click", () => {
+            setTimeout(updateEstimateDisplay, 50);
+        });
+    });
+});
